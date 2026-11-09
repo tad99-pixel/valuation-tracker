@@ -238,12 +238,38 @@ def consecutive_streak(series, predicate) -> int:
     return n
 
 
-def dividend_record(panel: pd.DataFrame, want_years: int):
+def _with_payment_history(state: pd.Series, payments: pd.Series, want_years: int) -> pd.Series:
+    """`state` extended back with a record of dividend payments.
+
+    The fiscal calendar is carried back `want_years` + 1 years before the
+    first filed year. A fiscal year the payment record covers is paid if any
+    dividend went ex inside it, and unpaid if none did - unless the filings
+    say it was paid, which stands: an annual payer's ex-date can slip across
+    a year end. Years before the record begins stay unknown.
+    """
+    since = payments.attrs.get('since')
+    ends = list(state.index)
+    earlier = [ends[0] - pd.DateOffset(years=k) for k in range(want_years + 1, 0, -1)]
+    full = state.reindex(pd.DatetimeIndex(earlier + ends))
+    starts = [full.index[0] - pd.DateOffset(years=1)] + list(full.index[:-1])
+    when = pd.DatetimeIndex(payments.index)
+    for begin, end in zip(starts, full.index):
+        if begin < since:
+            continue
+        if ((when > begin) & (when <= end)).any():
+            full[end] = 1.0
+        elif pd.isna(full[end]):
+            full[end] = 0.0
+    return full
+
+
+def dividend_record(panel: pd.DataFrame, want_years: int, payments: pd.Series | None = None):
     """Graham's criterion 4, reported against the history that actually exists.
 
     Graham asked for twenty years of uninterrupted dividends. XBRL begins
-    around 2009, so for most companies twenty years cannot be checked from
-    this source at all, and reporting FAIL there would confuse an
+    around 2009, so the filings alone cannot check twenty years for anyone.
+    `payments` - each ticker's dividend history from its price record - covers
+    the earlier years; without it, reporting FAIL would confuse an
     unverifiable claim with a refuted one. An interruption *inside* the
     visible record is a different matter: it refutes the claim outright,
     however short the record.
@@ -262,7 +288,8 @@ def dividend_record(panel: pd.DataFrame, want_years: int):
     """
     dps = panel.get('dividends_per_share')
     paid = panel.get('dividends_paid')
-    if dps is None and paid is None:
+    history = bool(payments is not None and payments.attrs.get('since') is not None and len(panel))
+    if dps is None and paid is None and not history:
         return {'streak': 0, 'window': 0, 'verifiable': False, 'interrupted': False,
                 'pays_now': False, 'note': 'no dividend tags filed'}
 
@@ -282,6 +309,8 @@ def dividend_record(panel: pd.DataFrame, want_years: int):
         for i in range(paid_pos[-1] + 1, len(state)):
             if pd.isna(state.iloc[i]) and bool(statements.iloc[i]):
                 state.iloc[i] = 0.0
+    if history:
+        state = _with_payment_history(state, payments, want_years)
 
     streak, stop_at = 0, None
     for d_, v in zip(reversed(state.index), reversed(state.tolist())):
@@ -300,18 +329,20 @@ def dividend_record(panel: pd.DataFrame, want_years: int):
         'interrupted': interrupted,
         'pays_now': bool(len(state) and state.iloc[-1] == 1.0),
     }
+    source = (' (filings, and the dividend record before them)' if history else '')
     if interrupted:
         out['note'] = (f'no dividend in fiscal {_year_label(stop_at[0])} - current streak '
-                       f'{streak}y, so {want_years}y uninterrupted is refuted')
+                       f'{streak}y, so {want_years}y uninterrupted is refuted{source}')
     elif out['verifiable']:
-        out['note'] = f'{streak}y uninterrupted'
+        out['note'] = f'{streak}y uninterrupted{source}'
     elif stop_at is None:
         out['note'] = (f'{streak}y unbroken across the whole {window}y record; Graham '
-                       f'asks for {want_years}y, which XBRL cannot reach')
+                       f'asks for {want_years}y'
+                       + ('' if history else ', which XBRL cannot reach'))
     else:
         since = (f' since fiscal {_year_label(state.index[window - streak])}'
                  if streak else '')
-        out['note'] = (f'{streak}y unbroken{since}; no readable dividend tag for fiscal '
+        out['note'] = (f'{streak}y unbroken{since}; no dividend record for fiscal '
                        f'{_year_label(stop_at[0])}, so {want_years}y cannot be verified')
     return out
 
@@ -555,8 +586,13 @@ def share_count_trend(panel: pd.DataFrame, years: int = 10):
 # Summary
 # ---------------------------------------------------------------------------
 
-def summarise(panel: pd.DataFrame, cfg, group: str = 'operating') -> dict:
-    """The derived numbers both criteria modules need, computed once."""
+def summarise(panel: pd.DataFrame, cfg, group: str = 'operating',
+              payments: pd.Series | None = None) -> dict:
+    """The derived numbers both criteria modules need, computed once.
+
+    `payments` is the company's dividend history from its price record (see
+    `sources.get_dividends`), which carries the dividend test past the
+    start of XBRL."""
     b, g = cfg.buffett, cfg.graham
     out = {}
 
@@ -571,7 +607,7 @@ def summarise(panel: pd.DataFrame, cfg, group: str = 'operating') -> dict:
     out['eps_positive'], out['eps_years'], out['eps_negative_years'] = positive_years(
         eps, g.earnings_stability_years)
 
-    out['dividend'] = dividend_record(panel, g.dividend_years)
+    out['dividend'] = dividend_record(panel, g.dividend_years, payments)
     out['share_count_cagr'], out['share_count_note'] = share_count_trend(
         panel, b.quality_window_years)
 

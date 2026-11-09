@@ -2,8 +2,11 @@
 #
 # A starting set chosen to exercise every path through the engine - operating
 # companies, banks, insurers, REITs and utilities each take different tests -
-# not a recommendation. Edit freely. For a whole index instead:
-#     python run_valuation.py --universe sp500
+# not a recommendation. Edit freely.
+#
+# A line '@sp500' (or '@sp600') adds every constituent of that index; the
+# dashboard's List filter separates them from the names listed here. Delete
+# that line at the bottom to track only these.
 
 # --- consumer staples / durable franchises
 KO
@@ -73,3 +76,6 @@ SPG
 SO
 DUK
 NEE
+
+# --- and every other S&P 500 constituent
+@sp500

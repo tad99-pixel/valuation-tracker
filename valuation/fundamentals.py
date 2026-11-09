@@ -223,6 +223,12 @@ INSTANT_CONCEPTS = {
         'PreferredStockIncludingAdditionalPaidInCapital',
         'PreferredStockValue',
     ],
+    # For a filer that tags no total: shares outstanding times the price each
+    # is redeemed at. American Express files its $1.6bn as 1,600 shares at
+    # $1,000,000, with a PreferredStockValue of zero (par).
+    'preferred_shares': ['PreferredStockSharesOutstanding'],
+    'preferred_price_per_share': ['PreferredStockLiquidationPreference',
+                                  'PreferredStockRedemptionPricePerShare'],
     'minority_interest': ['MinorityInterest'],
     # `CommonStockSharesIssued` is deliberately NOT a fallback here. Issued
     # shares include treasury stock: Exxon files 8.02bn issued against 4.73bn
@@ -240,7 +246,7 @@ SHARE_COUNT_CONCEPTS = ('shares_diluted', 'shares_basic', 'shares_outstanding')
 # these before an uncorrectable basis break; dollar columns keep their history.
 PER_SHARE_COLUMNS = PER_SHARE_CONCEPTS + (
     'eps', 'bvps', 'tangible_bvps', 'ncav_per_share', 'fcf_per_share',
-    'revenue_per_share', 'shares_used', 'payout_ratio')
+    'revenue_per_share', 'shares_used', 'shares_year_end', 'payout_ratio')
 
 
 # ---------------------------------------------------------------------------
@@ -248,9 +254,9 @@ PER_SHARE_COLUMNS = PER_SHARE_CONCEPTS + (
 # ---------------------------------------------------------------------------
 
 def _units_for(concept: str) -> tuple:
-    if concept in PER_SHARE_CONCEPTS:
+    if concept in PER_SHARE_CONCEPTS or concept == 'preferred_price_per_share':
         return ('USD/shares',)
-    if concept in SHARE_COUNT_CONCEPTS:
+    if concept in SHARE_COUNT_CONCEPTS or concept == 'preferred_shares':
         return ('shares',)
     return ('USD',)
 
@@ -956,7 +962,16 @@ def _derive_columns(panel: pd.DataFrame) -> pd.DataFrame:
     # value of the common ("deducting all liabilities and stock issues ahead
     # of the common"). Left in, a bank's book value per share carried its
     # preferred: $20bn at JPMorgan, $19bn at Wells Fargo.
-    preferred = col('preferred_equity').fillna(0).clip(lower=0)
+    filed_pref = col('preferred_equity')
+    implied_pref = col('preferred_shares') * col('preferred_price_per_share')
+    # The implied total replaces a filed one only where that is missing or is
+    # plainly par value, and never exceeds half of equity - beyond that the
+    # per-share price is more likely per depositary share than per share.
+    use_implied = (implied_pref.notna() & (implied_pref > 0)
+                   & (filed_pref.isna() | (filed_pref < 0.5 * implied_pref))
+                   & (implied_pref <= 0.5 * col('equity').abs()))
+    preferred = filed_pref.where(~use_implied, implied_pref).fillna(0).clip(lower=0)
+    p['preferred_claim'] = preferred
     p['common_equity'] = col('equity') - preferred
     p['ncav'] = col('assets_current') - p['liabilities'] - preferred
     p['tangible_equity'] = (p['common_equity'] - col('goodwill').fillna(0)
@@ -1025,9 +1040,19 @@ def _derive_columns(panel: pd.DataFrame) -> pd.DataFrame:
     p.attrs['share_unit_fixes'] = unit_fixes
     p.attrs['shares_from_identity'] = int(fill_ok.sum())
 
-    p['bvps'] = p['common_equity'] / shares.replace(0, np.nan)
-    p['tangible_bvps'] = p['tangible_equity'] / shares.replace(0, np.nan)
-    p['ncav_per_share'] = p['ncav'] / shares.replace(0, np.nan)
+    # Book value and net current assets are year-end balances, so they are
+    # divided by the shares outstanding at the year end, not by the year's
+    # weighted average - which lags a buyback programme and overstates the
+    # count it divides by. The weighted count stands in where no year-end
+    # count is filed, or where the two disagree by more than a quarter (a
+    # count filed for one class, or at the wrong scale).
+    outstanding, _ = _repair_unit_scale(col('shares_outstanding'))
+    agree = (outstanding / shares.replace(0, np.nan)).between(0.8, 1.25)
+    year_end = outstanding.where(agree, shares)
+    p['shares_year_end'] = year_end
+    p['bvps'] = p['common_equity'] / year_end.replace(0, np.nan)
+    p['tangible_bvps'] = p['tangible_equity'] / year_end.replace(0, np.nan)
+    p['ncav_per_share'] = p['ncav'] / year_end.replace(0, np.nan)
     p['fcf_per_share'] = p['fcf'] / shares.replace(0, np.nan)
     p['revenue_per_share'] = col('revenue') / shares.replace(0, np.nan)
 

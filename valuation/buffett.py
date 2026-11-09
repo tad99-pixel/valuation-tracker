@@ -20,7 +20,9 @@ rate, which is why its range at +/-1 point is reported beside it) but because
 it needs no growth forecast. The forward DCF is reported beside it, as one
 estimate among several, never as "the" intrinsic value.
 
-**On the range.** Up to three earnings-based models feed a *median*, and its
+**On the range.** The models that capitalise earnings at the required return -
+a DCF and EPV, or for a bank or insurer justified P/B and an earnings value -
+feed a *median*, and its
 dispersion - (highest - lowest) / (highest + lowest) - qualifies it. When the
 highest estimate is more than about three times the lowest
 (`max_model_dispersion` 0.5), the margin of safety is withheld rather than
@@ -255,6 +257,51 @@ def _cash_flow_base(summary: dict, info: dict) -> tuple:
     return base, basis, None
 
 
+def required_returns(panel: pd.DataFrame, info: dict, price, macro: dict,
+                     cfg: ValuationConfig) -> dict:
+    """The rate the DCF discounts at and the rate EPV capitalises at, both
+    derived from one required return on the business.
+
+    The DCF discounts owner earnings, struck after interest - a cash flow to
+    the equity. EPV capitalises operating income, struck before interest - a
+    cash flow to the whole company, debt included. Using the same 9% for both
+    treated a heavily indebted company's equity as no riskier than its
+    business, which flattered its DCF, and charged its EPV more than its
+    capital costs. Here `discount_rate` is the return required of the
+    business before debt, and with tax-deductible interest (Modigliani-Miller)
+
+        equity rate       r + (r - debt cost) x (1 - tax) x debt / equity
+        whole-company     r x (1 - tax x debt / (debt + equity))
+
+    at market values. The debt cost is interest over debt, floored at the AAA
+    yield; banks and insurers, whose borrowing is their business, are not
+    adjusted. Returns ``{'equity', 'enterprise', 'note'}``.
+    """
+    b = cfg.buffett
+    r, tax = b.discount_rate, b.effective_tax_rate
+    out = {'equity': r, 'enterprise': r}
+    debt, shares = _last(panel, 'total_debt'), info.get('shares_outstanding_now')
+    if info.get('group') in BOOK_VALUED_GROUPS:
+        return dict(out, note=f'{r:.1%} required return; no leverage adjustment for a '
+                              'balance-sheet business')
+    if not price or not shares or debt is None or debt <= 0:
+        why = 'no debt' if debt is not None and debt <= 0 else 'leverage unknown'
+        return dict(out, note=f'{r:.1%} required return ({why})')
+    equity = price * shares
+    aaa = macro.get('aaa_yield')
+    floor = aaa / 100.0 if aaa else 0.04
+    interest = _last(panel, 'interest_expense')
+    debt_cost = abs(interest) / debt if interest else floor + 0.01
+    debt_cost = min(max(debt_cost, floor), r - 0.005)
+    leverage = debt / equity
+    out['equity'] = min(r + (r - debt_cost) * (1 - tax) * min(leverage, 3.0), r + 0.08)
+    out['enterprise'] = r * (1 - tax * debt / (debt + equity))
+    out['note'] = (f'{r:.1%} required of the business; {out["equity"]:.1%} of the equity and '
+                   f'{out["enterprise"]:.1%} of the whole company, at debt of {leverage:.2f}x '
+                   f'market value costing {debt_cost:.1%}')
+    return out
+
+
 def _two_stage_pv(cf0: float, g1: float, r: float, g_term: float,
                   n: int, fade: bool) -> float:
     """Present value of a cash flow growing at g1, fading to g_term, then forever.
@@ -276,7 +323,7 @@ def _two_stage_pv(cf0: float, g1: float, r: float, g_term: float,
 
 
 def dcf_value(panel: pd.DataFrame, summary: dict, info: dict,
-              cfg: ValuationConfig):
+              cfg: ValuationConfig, rates: dict):
     """Two-stage DCF on owner earnings, per share.
 
     Owner earnings are struck after interest, so they are a cash flow to
@@ -322,16 +369,17 @@ def dcf_value(panel: pd.DataFrame, summary: dict, info: dict,
         g_src = 'terminal rate (no defined historical growth)'
 
     g1 = float(np.clip(g_hist, b.min_stage1_growth, b.max_stage1_growth))
-    pv = _two_stage_pv(base, g1, b.discount_rate, b.terminal_growth,
-                       b.stage1_years, b.fade_growth)
+    r = rates['equity']
+    pv = _two_stage_pv(base, g1, r, b.terminal_growth, b.stage1_years, b.fade_growth)
     if not np.isfinite(pv):
         return None, {'note': 'discount rate must exceed terminal growth'}
 
     detail = {
         'growth_stage1': g1,
         'growth_source': g_src,
+        'rate': r,
         'note': (f'{basis} ${base / 1e9:,.2f}bn growing {g1:.1%} fading to '
-                 f'{b.terminal_growth:.1%}, discounted at {b.discount_rate:.1%}'),
+                 f'{b.terminal_growth:.1%}, discounted at {r:.1%} ({rates["note"]})'),
     }
     if abs(g1 - g_hist) > 1e-9:
         detail['note'] += f' (historical {g_hist:.1%} clipped to the {b.max_stage1_growth:.0%} cap)'
@@ -403,7 +451,7 @@ def _implied_growth(base: float, target: float, r: float, b) -> tuple:
 
 
 def reverse_dcf(panel: pd.DataFrame, summary: dict, info: dict,
-                price: float, cfg: ValuationConfig):
+                price: float, cfg: ValuationConfig, rates: dict | None = None):
     """The growth rate the current price is assuming.
 
     This is the question worth asking. A forward DCF converts an assumption
@@ -435,7 +483,8 @@ def reverse_dcf(panel: pd.DataFrame, summary: dict, info: dict,
         return None, {'note': why}
 
     target = price * shares          # market capitalisation to be justified
-    g, bound = _implied_growth(base, target, b.discount_rate, b)
+    r = (rates or {}).get('equity', b.discount_rate)
+    g, bound = _implied_growth(base, target, r, b)
     if g is None:
         return None, {'note': 'discount rate must exceed terminal growth'}
     lo, hi = REVERSE_DCF_BOUNDS
@@ -447,22 +496,22 @@ def reverse_dcf(panel: pd.DataFrame, summary: dict, info: dict,
         return hi, {'note': f'price implies more than {hi:.0%} annual growth for '
                             f'{b.stage1_years} years - beyond the solver\'s range',
                     'at_bound': True}
-    around = [_implied_growth(base, target, b.discount_rate + d, b)[0] for d in (-0.01, 0.01)]
+    around = [_implied_growth(base, target, r + d, b)[0] for d in (-0.01, 0.01)]
     note = (f'today\'s price implies {g:.1%} annual growth for '
-            f'{b.stage1_years} years at a {b.discount_rate:.0%} discount rate')
+            f'{b.stage1_years} years at a {r:.1%} discount rate')
     if None not in around:
-        note += (f' ({around[0]:.1%} at {b.discount_rate - 0.01:.0%}, '
-                 f'{around[1]:.1%} at {b.discount_rate + 0.01:.0%})')
+        note += (f' ({around[0]:.1%} at {r - 0.01:.1%}, '
+                 f'{around[1]:.1%} at {r + 0.01:.1%})')
     hist = summary.get('owner_earnings_cagr')
     if hist is not None:
         note += (f'; owner earnings have grown {hist:.1%} a year '
                  f'({summary.get("owner_earnings_cagr_basis") or "basis unknown"})')
-    return g, {'note': note, 'at_bound': False,
+    return g, {'note': note, 'at_bound': False, 'rate': r,
                'range': around if None not in around else None}
 
 
 def epv_value(panel: pd.DataFrame, summary: dict, info: dict,
-              cfg: ValuationConfig):
+              cfg: ValuationConfig, rates: dict):
     """Earnings power value: normalised operating earnings, no growth credited.
 
     Greenwald's construction, not Buffett's or Graham's. It capitalises
@@ -514,16 +563,49 @@ def epv_value(panel: pd.DataFrame, summary: dict, info: dict,
                                   'expense says there is some - net debt unknown'}
         nd = -((_last(panel, 'cash') or 0.0) + (_last(panel, 'short_term_investments') or 0.0))
         debt_note = ' (no debt filed and no material interest expense, so debt taken as nil)'
-    ev = norm * (1 - b.effective_tax_rate) / b.epv_discount_rate
+    r = rates['enterprise']
+    ev = norm * (1 - b.effective_tax_rate) / r
     return (ev - nd) / shares, {
         'note': (f'operating income ({note}) ${norm / 1e9:,.2f}bn after '
-                 f'{b.effective_tax_rate:.0%} tax, capitalised at '
-                 f'{b.epv_discount_rate:.0%}, less ${nd / 1e9:,.2f}bn net debt'
+                 f'{b.effective_tax_rate:.0%} tax, capitalised at {r:.1%}, the '
+                 f'whole-company rate, less ${nd / 1e9:,.2f}bn net debt'
                  f'{debt_note}; no growth credited')}
 
 
+def earnings_value(summary: dict, info: dict, rates: dict):
+    """A bank's or insurer's average earnings, capitalised at the required return.
+
+    The book-valued groups have no owner earnings or EPV - their cash flows
+    are not separable from the balance sheet - which left justified P/B as
+    their only value model, and a single model is not a range. Their earnings
+    are still earnings: three years' average EPS capitalised at the required
+    return, with no growth credited, is the earning-power view of a bank.
+    Graham's "15 x EPS" is not this - it is criterion 6's price ceiling, an
+    earnings yield of 6.7% whatever the required return.
+    """
+    if info.get('group') not in BOOK_VALUED_GROUPS:
+        return None, {'note': 'used for banks, insurers and other financials; EPV covers the rest'}
+    if G._basis(info):
+        return None, {'note': G._basis(info)}
+    eps3 = summary.get('eps_avg3')
+    if eps3 is None:
+        return None, {'note': summary.get('eps_avg3_note') or 'needs a 3-year average EPS'}
+    if eps3 <= 0:
+        return None, {'note': f'3-year average EPS is {eps3:,.2f} - nothing to capitalise'}
+    r = rates['equity']
+    return eps3 / r, {'note': f'3-year average EPS {eps3:,.2f} / required return {r:.1%}; '
+                              'no growth credited'}
+
+
 def earnings_multiple_value(summary: dict, cfg: ValuationConfig, info: dict):
-    """Graham's criterion 6 read as a price: 15 x the three-year average EPS."""
+    """Graham's criterion 6 read as a price: 15 x the three-year average EPS.
+
+    A price limit, like the Graham Number (of which it is one factor): the
+    most Graham's defensive investor would pay, not an estimate of worth. It
+    once fed the estimate, and as the middle of three models it set the
+    median for two companies in three - so "price to value" mostly restated
+    "P/E above 15", which criterion 6 already tests.
+    """
     if _carved(info, 'max_pe_3yr_avg'):
         return None, {'note': G.reit_eps_reason(info.get('group'))}
     if G._basis(info):
@@ -558,23 +640,26 @@ def intrinsic_values(panel: pd.DataFrame, info: dict, summary: dict,
             'source_tier': tier, 'detail': detail,
         }
 
+    rates = required_returns(panel, info, price, macro, cfg)
     record('dcf', 'Two-stage DCF on owner earnings',
-           *dcf_value(panel, summary, info, cfg), 'derived')
+           *dcf_value(panel, summary, info, cfg, rates), 'derived')
     record('epv', 'Earnings power value (no growth)',
-           *epv_value(panel, summary, info, cfg), 'third-party')
+           *epv_value(panel, summary, info, cfg, rates), 'third-party')
     record('graham_number', 'Graham Number',
            *G.graham_number(panel, summary, cfg, info), 'graham-derived')
     record('ncav', 'Net current asset value', *G.ncav_per_share(panel, info), 'graham')
-    record('earnings_multiple', '15 x 3-year average EPS',
+    record('earnings_multiple', "15 x 3-year average EPS (criterion 6's ceiling)",
            *earnings_multiple_value(summary, cfg, info), 'graham')
     if info.get('group') in BOOK_VALUED_GROUPS:
         record('justified_pb', 'Justified price-to-book (ROE-based)',
                *justified_pb_value(panel, summary, info, cfg), 'derived')
+        record('earnings_value', 'Average earnings at the required return (no growth)',
+               *earnings_value(summary, info, rates), 'derived')
     record('growth_formula', 'Graham growth formula',
            *G.growth_formula_value(summary, macro, cfg, info), 'graham-disavowed')
 
     if price:
-        g, d = reverse_dcf(panel, summary, info, price, cfg)
+        g, d = reverse_dcf(panel, summary, info, price, cfg, rates)
         out['reverse_dcf'] = {
             'label': 'Growth implied by the current price', 'value': g,
             'note': d.get('note'), 'applicable': g is not None,
@@ -605,9 +690,10 @@ def intrinsic_values(panel: pd.DataFrame, info: dict, summary: dict,
 
 
 # Models that estimate what the business is worth, by capitalising what it
-# earns. These, and only these, go into the consensus. `justified_pb` only
-# ever produces a value for financial companies, where the first two cannot.
-VALUE_MODELS = ('dcf', 'epv', 'earnings_multiple', 'justified_pb')
+# earns at the required return. These, and only these, go into the consensus.
+# `justified_pb` and `earnings_value` only ever produce a value for financial
+# companies, where the first two cannot.
+VALUE_MODELS = ('dcf', 'epv', 'justified_pb', 'earnings_value')
 
 # Prices at which Graham's rules would be satisfied. These are *not* estimates
 # of intrinsic value and mixing them into one median was a mistake worth
@@ -616,14 +702,19 @@ VALUE_MODELS = ('dcf', 'epv', 'earnings_multiple', 'justified_pb')
 # company is worth - it reports that Graham would never have bought it. Pooled
 # with a DCF it produced a 76% spread on Apple and suppressed the margin of
 # safety on almost every name, for a structural reason rather than a finding.
-PRICE_LIMIT_MODELS = ('graham_number', 'ncav', 'ncav_two_thirds')
+# 15 x EPS is the same kind of number - criterion 6's ceiling, and one factor
+# of the Graham Number - and is shown beside it, not averaged in.
+PRICE_LIMIT_MODELS = ('earnings_multiple', 'graham_number', 'ncav', 'ncav_two_thirds')
 
 
 def consensus_value(models: dict, cfg: ValuationConfig) -> dict:
     """Median of the earnings-based models, with the spread that qualifies it.
 
-    Three exclusions, each for its own reason:
+    Four exclusions, each for its own reason:
 
+    * **15 x average EPS.** Criterion 6's ceiling, the most Graham's defensive
+      investor would pay - and as the middle of three models it once set the
+      estimate for two companies in three.
     * **The growth formula.** Graham published it in 1962 and then spent years
       warning against it. It is linear in a forecast growth rate, so including
       it would let the least defensible model move the headline.
@@ -632,7 +723,7 @@ def consensus_value(models: dict, cfg: ValuationConfig) -> dict:
     * **NCAV.** A liquidation floor. For most profitable going concerns it is
       negative, which says nothing about what the business is worth.
 
-    All four are still computed and reported; they are simply reported as what
+    All are still computed and reported; they are simply reported as what
     they are.
     """
     vals, used = [], []

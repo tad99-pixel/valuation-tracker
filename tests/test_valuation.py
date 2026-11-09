@@ -304,14 +304,15 @@ def test_clean_company_is_measured():
     r = S.evaluate('TEST', p, info, prices, MACRO, CFG)
     assert r['info']['per_share_basis_note'] is None
     assert r['completeness'] > 0.8, r['completeness']
-    assert r['consensus']['n_models'] == 3, r['consensus']
+    assert r['consensus']['models_used'] == ['dcf', 'epv'], r['consensus']
+    assert r['models']['earnings_multiple']['role'] == 'price_limit'
     assert crit(r, 'earnings_stability').verdict == 'PASS'
     print(f'  clean company: {r["verdict"]}, completeness {r["completeness"]:.0%}')
 
 
 def test_dispersion_is_one_measure_for_any_model_count():
     def models(*vals):
-        keys = ('dcf', 'epv', 'earnings_multiple')
+        keys = ('dcf', 'epv', 'justified_pb')
         return {k: {'value': v, 'applicable': True} for k, v in zip(keys, vals)}
     c = B.consensus_value(models(100.0, 300.0), CFG)
     assert abs(c['dispersion'] - 0.5) < 1e-12 and c['reliable']
@@ -471,7 +472,7 @@ def test_negative_equity_fails_the_utility_leverage_test():
 
 def test_dispersion_caps_three_models_at_three_x():
     def models(*vals):
-        keys = ('dcf', 'epv', 'earnings_multiple')
+        keys = ('dcf', 'epv', 'justified_pb')
         return {k: {'value': v, 'applicable': True} for k, v in zip(keys, vals)}
     assert not B.consensus_value(models(60.0, 250.0, 260.0), CFG)['reliable'], '4.3x spread measured'
     assert B.consensus_value(models(100.0, 150.0, 290.0), CFG)['reliable']
@@ -869,6 +870,197 @@ def test_a_company_that_changed_registration_keeps_its_history():
     assert merged.source == 'stale-cache' and merged.sha1
     assert SRC.MergedFacts([Ref('cache', 'a'), Ref('cache', None)]).sha1 is None
     print('  successions: one history across a change of registration')
+
+
+# ---------------------------------------------------------------------------
+# Suggested improvements (2026-11-09, config r6)
+# ---------------------------------------------------------------------------
+
+def test_dividend_record_reaches_back_through_the_payment_history():
+    """Graham's twenty years cannot be read from XBRL, which starts in 2009;
+    the price record's dividend history covers the years before it."""
+    p = pd.DataFrame({'dividends_per_share': 1.0, 'cfo': 1.0}, index=years(10, 2016))
+    pay = pd.Series(0.5, index=pd.date_range('1996-02-15', '2025-11-15', freq='3MS')
+                    + pd.Timedelta(days=14))
+    pay.attrs['since'] = pd.Timestamp('1995-01-03')
+    r = M.dividend_record(p, 20, pay)
+    assert r['verifiable'] and r['streak'] >= 20 and not r['interrupted'], r
+    gap = pay[pay.index.year != 2010]
+    gap.attrs['since'] = pay.attrs['since']
+    r = M.dividend_record(p, 20, gap)
+    assert r['interrupted'] and 'fiscal 2010' in r['note'], r
+    late = pay[pay.index >= '2012-01-01']
+    late.attrs['since'] = pd.Timestamp('2012-01-03')
+    r = M.dividend_record(p, 20, late)
+    assert not r['verifiable'] and not r['interrupted'], r
+    print('  dividends: twenty years from filings plus the payment record')
+
+
+def test_preferred_stock_from_shares_and_redemption_price():
+    """American Express files $1.6bn of preferred as 1,600 shares at
+    $1,000,000 and a PreferredStockValue of zero (par)."""
+    p = pd.DataFrame({'equity': [30e9] * 3, 'preferred_equity': [0.0] * 3,
+                      'preferred_shares': [1600.0] * 3, 'preferred_price_per_share': [1e6] * 3,
+                      'shares_diluted': [700e6] * 3, 'net_income': [10e9] * 3}, index=years(3))
+    out = F._derive_columns(p)
+    assert out['preferred_claim'].iloc[-1] == 1.6e9, out['preferred_claim']
+    assert abs(out['common_equity'].iloc[-1] - 28.4e9) < 1
+    print('  preferred: shares x redemption price where no total is filed')
+
+
+def test_book_value_per_share_uses_year_end_shares():
+    p = pd.DataFrame({'equity': [100.0] * 3, 'shares_diluted': [10.0] * 3,
+                      'shares_outstanding': [9.0] * 3, 'net_income': [1.0] * 3}, index=years(3))
+    assert abs(F._derive_columns(p)['bvps'].iloc[-1] - 100 / 9) < 1e-9
+    p['shares_outstanding'] = 3.0          # one class's count: not used
+    assert abs(F._derive_columns(p)['bvps'].iloc[-1] - 10.0) < 1e-9
+    print('  book value: per share outstanding at the year end')
+
+
+def test_discount_rates_follow_leverage():
+    """The DCF's rate is the equity's, which debt makes riskier; EPV's is the
+    whole company's, which debt's tax shield makes cheaper."""
+    p, info, prices = synthetic_company()
+    price = float(prices['Close'].iloc[-1])
+    r = CFG.buffett.discount_rate
+    rates = B.required_returns(p, info, price, MACRO, CFG)
+    assert rates['equity'] > r > rates['enterprise'], rates
+    unlevered = p.copy()
+    unlevered['total_debt'] = 0.0
+    flat = B.required_returns(unlevered, info, price, MACRO, CFG)
+    assert flat['equity'] == flat['enterprise'] == r
+    assert B.required_returns(p, dict(info, group='bank'), price, MACRO, CFG)['equity'] == r
+    dcf = lambda q: S.evaluate('X', q, info, prices, MACRO, CFG)['models']['dcf']['value']  # noqa: E731
+    assert dcf(p) < dcf(unlevered), 'debt did not raise the equity rate'
+    print(f'  rates: {rates["equity"]:.2%} equity, {rates["enterprise"]:.2%} whole company')
+
+
+def test_banks_get_two_value_models_and_15x_is_a_price_limit():
+    p, info, prices = synthetic_company()
+    r = S.evaluate('BANK', p, dict(info, group='bank'), prices, MACRO, CFG)
+    assert set(r['consensus']['models_used']) == {'justified_pb', 'earnings_value'}, r['consensus']
+    assert r['models']['earnings_multiple']['role'] == 'price_limit'
+    print('  models: banks valued on justified P/B and earnings; 15x EPS a ceiling')
+
+
+def test_one_dollar_window_matches_the_retained_years():
+    p, info, prices = synthetic_company()
+    change, note = S._market_value_change(prices, p, 10, None)
+    start, end = p.index[-11], p.index[-1]
+    close = prices['Close']
+    want = (float(close[close.index <= end].iloc[-1]) * p['shares_used'].iloc[-1]
+            - float(close[close.index <= start].iloc[-1]) * p['shares_used'].iloc[-11])
+    assert abs(change - want) < 1e-6 * abs(want) and f'{start:%Y-%m}' in note, (change, want, note)
+    print(f'  one-dollar premise: market value over {note.split(":")[0]}')
+
+
+def test_share_class_figures_are_read_from_the_filing():
+    """Visa and Berkshire tag EPS and share counts only by class, which the
+    companyfacts feed drops; the filing's own instance keeps the class."""
+    from valuation import classes as C
+    ctx = ('<context id="{id}"><entity><identifier scheme="x">1</identifier><segment>{dims}'
+           '</segment></entity><period><startDate>2024-10-01</startDate>'
+           '<endDate>2025-09-30</endDate></period></context>')
+    member = ('<xbrldi:explicitMember dimension="us-gaap:StatementClassOfStockAxis">'
+              'us-gaap:CommonClass{c}Member</xbrldi:explicitMember>')
+    xml = ('<?xml version="1.0"?><xbrl xmlns="http://www.xbrl.org/2003/instance" '
+           'xmlns:xbrldi="http://xbrl.org/2006/xbrldi" xmlns:us-gaap="http://fasb.org/us-gaap/2024">'
+           + ctx.format(id='a', dims=member.format(c='A'))
+           + ctx.format(id='b', dims=member.format(c='B'))
+           + ctx.format(id='c', dims=member.format(c='A') + '<xbrldi:explicitMember '
+                        'dimension="srt:SegmentsAxis">x:Member</xbrldi:explicitMember>')
+           + '<us-gaap:EarningsPerShareDiluted contextRef="a" unitRef="u">10.20</us-gaap:EarningsPerShareDiluted>'
+           + '<us-gaap:EarningsPerShareDiluted contextRef="b" unitRef="u">40.80</us-gaap:EarningsPerShareDiluted>'
+           + '<us-gaap:EarningsPerShareDiluted contextRef="c" unitRef="u">99</us-gaap:EarningsPerShareDiluted>'
+           + '<us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding contextRef="a" unitRef="s">'
+           + '1950000000</us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding></xbrl>').encode()
+    rows = C.parse_instance(xml, 'CommonClassAMember')
+    assert sorted((r['concept'], r['val']) for r in rows) == [
+        ('EarningsPerShareDiluted', 10.2),
+        ('WeightedAverageNumberOfDilutedSharesOutstanding', 1.95e9)], rows
+    with tempfile.TemporaryDirectory() as d:
+        real = C.STORE_PATH
+        C.STORE_PATH = Path(d) / 'classes.json'
+        try:
+            C.STORE_PATH.write_text(json.dumps({'V': {
+                'member': 'CommonClassAMember', 'read': ['x'],
+                'facts': [dict(r, filed='2025-11-10', accn='x') for r in rows]}}))
+            blob = {'facts': facts_doc({'NetIncomeLoss': {'USD': [
+                dur('2024-10-01', '2025-09-30', 20e9, '2025-11-10')]}})}
+            panel, _ = F.build_panel('V', C.inject(blob, 'V')['facts'], {'sic': '7389'}, CFG,
+                                     splits=pd.Series(dtype=float))
+            assert panel['eps'].iloc[-1] == 10.2 and panel['shares_used'].iloc[-1] == 1.95e9
+            assert C.signature('V') and C.signature('KO') is None
+        finally:
+            C.STORE_PATH = real
+    print('  share classes: the traded class read from the filing, as plain facts')
+
+
+def test_watchlist_can_include_an_index():
+    import run_valuation as RV
+    from valuation import sources as SRC
+    real = SRC.index_constituents
+    SRC.index_constituents = lambda name, **k: ['AAPL', 'KO', 'NEWCO']
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            w = Path(d) / 'w.txt'
+            w.write_text('KO\nbrk.b  # a comment\n@sp500\n', encoding='utf-8')
+            tickers, lists = RV.read_watchlist(w, with_lists=True)
+    finally:
+        SRC.index_constituents = real
+    assert tickers == ['KO', 'BRK-B', 'AAPL', 'NEWCO'], tickers
+    assert lists['KO'] == ['Watchlist', 'S&P 500'] and lists['NEWCO'] == ['S&P 500'], lists
+    print('  watchlist: @sp500 adds the index, tagged by list')
+
+
+def test_large_dashboards_load_details_on_demand():
+    p, info, prices = synthetic_company()
+    r = S.evaluate('TEST', p, info, prices, MACRO, CFG)
+    today = pd.Timestamp.today().normalize()
+    changes = pd.DataFrame([
+        {'date': today, 'Ticker': 'TEST', 'change': 'below Graham Number', 'before': '1',
+         'after': '2', 'detail': 'x'},
+        {'date': today, 'Ticker': 'TEST', 'change': 'new', 'before': None, 'after': 'NO',
+         'detail': 'first evaluation'}])
+    pay = D.build_payload({'TEST': r}, {'TEST': p}, MACRO, None, CFG, changes=changes,
+                          lists={'TEST': ['Watchlist']})
+    assert [c['change'] for c in pay['changes']] == ['below Graham Number'], pay['changes']
+    assert pay['companies'][0]['lists'] == ['Watchlist']
+    real = D.INLINE_LIMIT
+    D.INLINE_LIMIT = 0
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            html = D.render(pay, path=Path(d) / 'dash.html', archive=False).read_text(encoding='utf-8')
+            js = (Path(d) / D.DETAILS_DIR / 'TEST.js').read_text(encoding='utf-8')
+    finally:
+        D.INLINE_LIMIT = real
+    start = html.index('id="data">') + len('id="data">')
+    data = json.loads(html[start:html.index('</script>', start)])
+    c = data['companies'][0]
+    assert 'criteria' not in c and c['file'] == 'TEST.js' and data['details'] == 'valuation_details/'
+    assert js.startswith('window.VT_DETAIL("TEST",') and '"criteria"' in js
+    assert 'criteria' in pay['companies'][0], 'render changed the payload it was given'
+    print('  dashboard: details in one script file per company when the list is long')
+
+
+def test_alerts_list_only_companies_that_moved():
+    import run_valuation as RV
+    day = pd.Timestamp('2026-11-09')
+    ch = pd.DataFrame([
+        {'date': day, 'Ticker': 'A', 'change': 'below intrinsic value', 'before': '10 vs 11',
+         'after': '9 vs 11', 'detail': 'x|y'},
+        {'date': day, 'Ticker': 'B', 'change': 'new', 'before': None, 'after': 'NO', 'detail': ''},
+        {'date': day, 'Ticker': 'C', 'change': 'verdict (rules r5 -> r6)', 'before': 'NO',
+         'after': 'WATCH', 'detail': ''}])
+    with tempfile.TemporaryDirectory() as d:
+        f = Path(d) / 'alerts.md'
+        assert RV.write_alerts(ch, f) == 1
+        text = f.read_text(encoding='utf-8')
+        assert '| A | below intrinsic value |' in text and 'x/y' in text, text
+        assert '| B |' not in text and '| C |' not in text, text
+        assert RV.write_alerts(ch.iloc[1:], Path(d) / 'none.md') == 0
+        assert not (Path(d) / 'none.md').exists()
+    print('  alerts: companies that moved, not new ones or rule changes')
 
 
 def test_reverse_dcf_reports_its_discount_rate_range():

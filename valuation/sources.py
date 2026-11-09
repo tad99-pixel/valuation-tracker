@@ -175,6 +175,41 @@ def _index_table_ciks(verbose: bool) -> dict:
     return out
 
 
+INDEX_URLS = {'sp500': WIKI_CIK_URLS[0], 'sp600': WIKI_CIK_URLS[1]}
+INDEX_NAMES = {'sp500': 'S&P 500', 'sp600': 'S&P 600'}
+
+
+def index_constituents(name: str, refresh_days: int = 7, verbose: bool = True) -> list:
+    """The tickers in an index (`sp500`, `sp600`), from its Wikipedia table.
+
+    The same tables the fallback ticker map reads, so a constituent always
+    resolves to a CIK even where SEC's own ticker list is unreachable (as it
+    is from GitHub's servers). Cached for a week; a failed refresh keeps the
+    last list rather than tracking nothing.
+    """
+    path = STATE_DIR / f'index_{name}.json'
+    cache = _read_json(path, {})
+    if cache.get('tickers') and time.time() - float(cache.get('fetched', 0)) < refresh_days * 86400:
+        return cache['tickers']
+    try:
+        resp = requests.get(INDEX_URLS[name], headers={'User-Agent': 'ValuationTracker/1.0'}, timeout=30)
+        resp.raise_for_status()
+        for tbl in pd.read_html(StringIO(resp.text)):
+            if 'Symbol' in [str(c) for c in tbl.columns]:
+                tickers = list(dict.fromkeys(_norm_ticker(s) for s in tbl['Symbol'] if isinstance(s, str)))
+                if len(tickers) > 100:
+                    _write_json(path, {'fetched': time.time(), 'tickers': tickers})
+                    return tickers
+        raise ValueError('no constituents table found')
+    except Exception as exc:  # noqa: BLE001
+        if cache.get('tickers'):
+            if verbose:
+                print(f'  {INDEX_NAMES[name]}: refresh failed ({exc}); using the list from '
+                      f'{datetime.fromtimestamp(float(cache["fetched"])):%Y-%m-%d}')
+            return cache['tickers']
+        raise RuntimeError(f'could not read the {INDEX_NAMES[name]} constituents ({exc})') from exc
+
+
 def load_cik_map(refresh_days: int = 14, verbose: bool = True, force: bool = False) -> dict:
     """Return {TICKER: cik}, cached on disk.
 
@@ -942,65 +977,116 @@ def get_prices(tickers, years: int = 12, force: bool = False,
 
 
 # ---------------------------------------------------------------------------
-# Splits
+# Corporate actions: splits and dividends
 # ---------------------------------------------------------------------------
 
 SPLITS_PATH = MACRO_DIR / 'splits.parquet'
 SPLITS_FETCHED_PATH = MACRO_DIR / 'splits_fetched.json'
+DIVIDENDS_PATH = MACRO_DIR / 'dividends.parquet'
+DIVIDENDS_SINCE_PATH = MACRO_DIR / 'dividends_since.json'
 # Splits before this date never touch a fact: XBRL filings begin in 2009, and
 # a fact is restated only for the splits after its own filing date.
 SPLITS_SINCE = '2008-01-01'
+# Dividends are wanted further back: Graham's record test asks for twenty
+# years, and the XBRL record is shorter.
+ACTIONS_SINCE = '1995-01-01'
 
 
-def _as_split_series(s) -> pd.Series:
+def _nonzero(s) -> pd.Series:
     if s is None or len(s) == 0:
         return pd.Series(dtype=float)
     s = pd.Series(s).astype(float)
     idx = pd.DatetimeIndex(s.index)
     s.index = idx.tz_localize(None) if idx.tz is not None else idx
-    s = s[s > 0]
-    return s[s.index >= pd.Timestamp(SPLITS_SINCE)].sort_index()
+    return s[s > 0].sort_index()
 
 
-def _splits_from_download(raw, t: str):
-    """The split events for `t` in a batch download, or None if `t` has no rows.
+def _as_split_series(s) -> pd.Series:
+    s = _nonzero(s)
+    return s[s.index >= pd.Timestamp(SPLITS_SINCE)]
 
-    A ticker that failed inside a batch comes back as an all-NaN column, and
-    reading that as "never split" is the error this module exists to avoid.
-    Only a ticker with prices in the result has a trustworthy splits column.
+
+def _actions_from_download(raw, t: str):
+    """``(splits, dividends, since)`` for `t` from a batch download, or None.
+
+    None when `t` has no rows: a ticker that failed inside a batch comes back
+    as an all-NaN column, and reading that as "never split" (or "never paid")
+    is the error this module exists to avoid. `since` is the first price date,
+    the earliest day for which a missing dividend means one was not paid.
     """
     sub = _ticker_frame(raw, t)
     if (sub is None or 'Close' not in sub or 'Stock Splits' not in sub
             or sub['Close'].notna().sum() == 0):
         return None
-    s = sub['Stock Splits'].fillna(0.0)
-    return _as_split_series(s[s != 0])
+    first = pd.DatetimeIndex(sub['Close'].dropna().index)[0]
+    since = first.tz_localize(None) if first.tz is not None else first
+    divs = _nonzero(sub['Dividends'].fillna(0.0)) if 'Dividends' in sub else None
+    return _as_split_series(sub['Stock Splits'].fillna(0.0)), divs, since
 
 
-def _download_splits(tickers: list) -> tuple:
-    """``({ticker: Series}, failed)`` - forty tickers to a request, with one
-    direct retry for any ticker missing from its batch."""
+def _download_actions(tickers: list) -> tuple:
+    """``(splits, dividends, failed)``: forty tickers to a request, with one
+    direct retry for any ticker missing from its batch. `dividends` maps a
+    ticker to ``(Series, since)``."""
     import yfinance as yf
-    ok, failed = {}, []
+    splits, dividends, failed = {}, {}, []
     for i in range(0, len(tickers), 40):
         batch = tickers[i:i + 40]
         try:
-            raw = yf.download(batch, start=SPLITS_SINCE, auto_adjust=False, actions=True,
+            raw = yf.download(batch, start=ACTIONS_SINCE, auto_adjust=False, actions=True,
                               progress=False, group_by='ticker', threads=True, timeout=30)
         except Exception:  # noqa: BLE001 - network, rate limit, parse
             raw = None
         for t in batch:
-            s = _splits_from_download(raw, t)
-            if s is None:
-                try:
-                    s = _as_split_series(yf.Ticker(t).splits)
-                except Exception:  # noqa: BLE001
-                    failed.append(t)
-                    continue
-            ok[t] = s
+            got = _actions_from_download(raw, t)
+            if got is not None:
+                splits[t] = got[0]
+                if got[1] is not None:
+                    dividends[t] = (got[1], got[2])
+                continue
+            try:
+                tk = yf.Ticker(t)
+                splits[t] = _as_split_series(tk.splits)
+            except Exception:  # noqa: BLE001
+                failed.append(t)
+                continue
+            try:
+                # Without the price history the record's start is unknown; the
+                # first dividend is the earliest date it can speak for.
+                d = _nonzero(tk.dividends)
+                d = d[d.index >= pd.Timestamp(ACTIONS_SINCE)]
+                dividends[t] = (d, d.index[0] if len(d) else None)
+            except Exception:  # noqa: BLE001
+                pass
         if i + 40 < len(tickers):
             time.sleep(0.6)
-    return ok, failed
+    return splits, dividends, failed
+
+
+def get_dividends(tickers) -> dict:
+    """Dividend payments per ticker since `ACTIONS_SINCE`, fetched with the
+    splits: ``{ticker: Series}``, with ``attrs['since']`` the first date the
+    history covers, or None for a ticker never fetched.
+
+    Graham's twenty-year dividend test reads it for the years before the
+    XBRL record begins; only whether a dividend was paid in a year is used.
+    """
+    since = _read_json(DIVIDENDS_SINCE_PATH, {})
+    try:
+        df = pd.read_parquet(DIVIDENDS_PATH)
+    except Exception:  # noqa: BLE001 - none fetched yet
+        df = pd.DataFrame(columns=['Ticker', 'Date', 'Amount'])
+    out = {}
+    for t in {_norm_ticker(x) for x in tickers}:
+        if t not in since:
+            out[t] = None
+            continue
+        sub = df[df['Ticker'] == t]
+        s = pd.Series(sub['Amount'].to_numpy(dtype=float),
+                      index=pd.DatetimeIndex(sub['Date'])).sort_index()
+        s.attrs['since'] = pd.Timestamp(since[t]) if since[t] else None
+        out[t] = s
+    return out
 
 
 def get_splits(tickers, max_age_days: int = 7, force: bool = False,
@@ -1037,12 +1123,15 @@ def get_splits(tickers, max_age_days: int = 7, force: bool = False,
 
     wanted = {_norm_ticker(t) for t in tickers}
     now = time.time()
+    div_since = _read_json(DIVIDENDS_SINCE_PATH, {})
+    # Due: a stale split record, or no dividend history yet (fetched together).
     due = sorted(t for t in wanted
-                 if force or now - float(fetched_at.get(t, 0)) > max_age_days * 86400)
+                 if force or now - float(fetched_at.get(t, 0)) > max_age_days * 86400
+                 or t not in div_since)
 
     failed = []
     if due:
-        ok, failed = _download_splits(due)
+        ok, dividends, failed = _download_actions(due)
         rows = []
         for t, s in ok.items():
             fetched_at[t] = now
@@ -1059,6 +1148,7 @@ def get_splits(tickers, max_age_days: int = 7, force: bool = False,
         except Exception:  # noqa: BLE001
             pass
         cached = df
+        _store_dividends(dividends, set(ok), div_since)
 
     out = _splits_to_dict(cached if cached is not None else
                           pd.DataFrame(columns=['Ticker', 'Date', 'Ratio']), wanted)
@@ -1074,6 +1164,29 @@ def get_splits(tickers, max_age_days: int = 7, force: bool = False,
                     + (f', {len(unknown)} with no verified history' if unknown else ''))
         print(msg)
     return out
+
+
+def _store_dividends(dividends: dict, fetched: set, since: dict) -> None:
+    """Replace the stored history of every ticker just fetched. A ticker whose
+    dividends could not be read is marked with an empty start, so it is not
+    fetched again on every run and reads as "history unknown"."""
+    try:
+        cached = pd.read_parquet(DIVIDENDS_PATH)
+    except Exception:  # noqa: BLE001
+        cached = None
+    rows = [{'Ticker': t, 'Date': d, 'Amount': float(v)}
+            for t, (s, _) in dividends.items() for d, v in s.items()]
+    new = pd.DataFrame(rows, columns=['Ticker', 'Date', 'Amount'])
+    keep = cached[~cached['Ticker'].isin(fetched)] if cached is not None else None
+    for t in fetched:
+        first = dividends.get(t, (None, None))[1]
+        since[t] = first.strftime('%Y-%m-%d') if first is not None else ''
+    try:
+        (pd.concat([keep, new], ignore_index=True) if keep is not None else new).to_parquet(
+            DIVIDENDS_PATH)
+        _write_json(DIVIDENDS_SINCE_PATH, since)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _splits_to_dict(df: pd.DataFrame, wanted: set) -> dict:

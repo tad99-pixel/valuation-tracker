@@ -62,7 +62,11 @@ REPLACE_SHEETS = {'Latest', 'Criteria', 'Models', 'Provenance'}
 STORED = ('History', 'RunLog', 'Changes', 'Latest')
 
 # How much of the accumulating sheets the workbook shows. The store keeps all.
+# The window shrinks for a large universe so the view stays near
+# WORKBOOK_MAX_ROWS rows: 400 days of the S&P 500 would be 200,000, slow to
+# write on every run and to open.
 WORKBOOK_HISTORY_DAYS = 400
+WORKBOOK_MAX_ROWS = 50_000
 
 HISTORY_COLS = ['date', 'run_id', 'Ticker', 'Price', 'IntrinsicValue',
                 'IntrinsicLow', 'IntrinsicHigh', 'PriceToValue', 'MarginOfSafety',
@@ -458,7 +462,9 @@ def write_workbook(store: dict, updates: dict, path=TRACKER_PATH) -> None:
     """Regenerate the Excel view: replace-sheets from this run, append-sheets
     from the store cut to the recent window."""
     path = Path(path)
-    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=WORKBOOK_HISTORY_DAYS)
+    companies = max(1, len(store.get('Latest', [])))
+    days = max(30, min(WORKBOOK_HISTORY_DAYS, WORKBOOK_MAX_ROWS // companies))
+    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=days)
     book = {}
     for sheet in SHEET_ORDER:
         if sheet in APPEND_KEYS:

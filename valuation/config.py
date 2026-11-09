@@ -34,7 +34,7 @@ LOG_PATH = ROOT / 'valuation_daily.log'
 # Stamped on every stored valuation. Bump whenever a threshold or a model
 # changes, so a tracker history is never silently pooled across two different
 # definitions of "margin of safety".
-CONFIG_VERSION = '2026-11-08-r5'
+CONFIG_VERSION = '2026-11-09-r6'
 
 for _d in (CACHE_DIR, FUND_DIR, FACTS_DIR, MACRO_DIR, STATE_DIR, REPORT_DIR):
     _d.mkdir(parents=True, exist_ok=True)
@@ -217,7 +217,10 @@ class BuffettConfig:
     # --- discounted cash flow ---
     # A DCF's output is dominated by these three numbers, which is why the
     # dashboard shows a reverse DCF alongside it. The discount rate is a
-    # required return, not a measured quantity.
+    # required return, not a measured quantity: the return required of the
+    # business before debt. Each company's equity rate (the DCF's) and
+    # whole-company rate (EPV's) are derived from it and its leverage - see
+    # `buffett.required_returns`.
     discount_rate: float = 0.09
     stage1_years: int = 10
     terminal_growth: float = 0.025
@@ -237,8 +240,7 @@ class BuffettConfig:
     cap_growth_at_revenue: bool = True
 
     # Earnings Power Value (Greenwald): normalised operating earnings
-    # capitalised at the cost of capital, with no growth credited at all.
-    epv_discount_rate: float = 0.09
+    # capitalised at the whole-company rate, with no growth credited at all.
     epv_normalisation_years: int = 7
     effective_tax_rate: float = 0.21
 
@@ -362,6 +364,15 @@ CIK_SUCCESSIONS = {
     # ExxonMobil Holdings Corp (Texas) took over the XOM listing in 2026; the
     # history is filed by Exxon Mobil Corp (New Jersey).
     2115436: (34088,),
+}
+
+# Companies that tag their EPS and share counts only per share class, which
+# SEC's companyfacts feed drops - leaving them with no per-share history at
+# all. Ticker -> the class member whose figures match the quoted price; see
+# `valuation.classes`, which reads them from each annual report's own XBRL.
+SHARE_CLASSES = {
+    'V': 'CommonClassAMember',        # Visa: Class A trades; B and C convert into it
+    'BRK-B': 'CommonClassBMember',    # Berkshire: per Class B share (1/1,500th of an A)
 }
 
 

@@ -58,46 +58,41 @@ def _tally(criteria: list) -> dict:
 
 
 def _market_value_change(prices: pd.DataFrame | None, panel: pd.DataFrame,
-                         shares_now, window_years: int, basis_note=None):
-    """Change in market capitalisation over the window, for the 1984 test.
+                         window_years: int, basis_note=None):
+    """Change in market value over the fiscal years whose retained earnings
+    it is set against, for the 1984 test.
 
-    Needs a price from the start of the window and the share count that
-    prevailed then, both of which the tracker has. Returns None rather than
-    approximating when the price history is too short - the test is about a
-    decade of capital allocation and running it over three years answers a
-    different question.
+    From the end of the fiscal year before the window to the end of the last
+    one: the same ten years `metrics.retained_earnings_test` sums. It used to
+    run ten calendar years back from today, a window shifted by up to a year
+    from the earnings it was compared with. Market value at each end is that
+    day's close times the shares outstanding at that year end. Returns None
+    rather than approximating when the history is too short - the test is
+    about a decade of capital allocation, and three years answers a different
+    question.
     """
     if prices is None or prices.empty or 'Close' not in prices:
         return None, 'no price history'
-    close = prices['Close'].dropna()
-    if close.empty:
-        return None, 'no price history'
-    start = close.index[-1] - pd.DateOffset(years=window_years)
-    early = close.loc[close.index <= start]
-    if early.empty:
-        span = (close.index[-1] - close.index[0]).days / 365.25
-        return None, (f'price history spans {span:.1f}y, need {window_years}y')
-
-    p0, p1 = float(early.iloc[-1]), float(close.iloc[-1])
     if basis_note:
-        # The historical share count is a per-share fact; the same guard as
-        # every other price comparison applies.
+        # The share counts are per-share facts; the same guard as every other
+        # price comparison applies.
         return None, basis_note
-    if not shares_now:
-        # The same rule as the valuation models: without a count vetted
-        # against the price there is no market value, only a product of two
-        # numbers that may describe different shares.
-        return None, 'no share count on the same basis as the price'
-    sh = panel.get('shares_used')
-    if sh is None or sh.notna().sum() == 0:
+    if len(panel) < window_years + 1:
+        return None, f'needs {window_years + 1} fiscal year-ends on file, has {len(panel)}'
+    start, end = panel.index[-(window_years + 1)], panel.index[-1]
+    close = prices['Close'].dropna()
+    at_start, at_end = close.loc[close.index <= start], close.loc[close.index <= end]
+    if at_start.empty:
+        return None, (f'price history starts {close.index[0]:%Y-%m}, after the window '
+                      f'opens ({start:%Y-%m})')
+    shares = panel['shares_year_end'] if 'shares_year_end' in panel.columns else panel.get('shares_used')
+    if shares is None:
         return None, 'no share count history'
-    sh = sh.dropna()
-    near = sh.index[np.argmin(np.abs((sh.index - start).days))]
-    if abs((near - start).days) > 400:
-        return None, f'no share count within a year of {start.year}'
-    s0 = float(sh.loc[near])
-    s1 = float(shares_now)
-    return (p1 * s1) - (p0 * s0), f'{window_years}y: {p0:,.2f} -> {p1:,.2f}'
+    s0, s1 = shares.loc[start], shares.loc[end]
+    if pd.isna(s0) or pd.isna(s1):
+        return None, f'no share count at the {"start" if pd.isna(s0) else "end"} of the window'
+    p0, p1 = float(at_start.iloc[-1]), float(at_end.iloc[-1])
+    return p1 * float(s1) - p0 * float(s0), f'{start:%Y-%m} to {end:%Y-%m}: {p0:,.2f} -> {p1:,.2f}'
 
 
 def _truncate_at_break(panel: pd.DataFrame, info: dict) -> tuple:
@@ -209,8 +204,11 @@ def _per_share_basis(price, panel: pd.DataFrame, info: dict):
 
 def evaluate(ticker: str, panel: pd.DataFrame, info: dict,
              prices: pd.DataFrame | None, macro: dict,
-             cfg: ValuationConfig) -> dict:
-    """Run every test on one company and return a single structured result."""
+             cfg: ValuationConfig, payments: pd.Series | None = None) -> dict:
+    """Run every test on one company and return a single structured result.
+
+    `payments` is its dividend history from the price record, which lets the
+    twenty-year dividend test look past the start of XBRL."""
     info = dict(info)
 
     price, price_date, stale_days = None, None, None
@@ -224,11 +222,10 @@ def evaluate(ticker: str, panel: pd.DataFrame, info: dict,
     panel, truncation = _truncate_at_break(panel, info)
     basis_problem = _check_price_basis(price, panel, info)
     per_share_problem = _per_share_basis(price, panel, info)
-    summary = M.summarise(panel, cfg, info.get('group', 'operating'))
+    summary = M.summarise(panel, cfg, info.get('group', 'operating'), payments)
 
     mv_change, mv_note = _market_value_change(
-        prices, panel, info.get('shares_outstanding_now'),
-        cfg.buffett.one_dollar_window_years, info.get('per_share_basis_note'))
+        prices, panel, cfg.buffett.one_dollar_window_years, info.get('per_share_basis_note'))
     info['market_value_change'] = mv_change
     info['market_value_note'] = mv_note
 
@@ -444,6 +441,7 @@ def to_row(result: dict) -> dict:
         'EPV': mv('epv'),
         'EarningsMultipleValue': mv('earnings_multiple'),
         'JustifiedPB': mv('justified_pb'),
+        'EarningsValue': mv('earnings_value'),
         'GrahamNumber': mv('graham_number'),
         'NCAVPerShare': mv('ncav'),
         'GrahamBargainPrice': mv('ncav_two_thirds'),
@@ -477,12 +475,14 @@ def to_row(result: dict) -> dict:
 
 
 def evaluate_all(panels: dict, infos: dict, prices: dict, macro: dict,
-                 cfg: ValuationConfig, verbose: bool = True) -> tuple:
+                 cfg: ValuationConfig, verbose: bool = True,
+                 payments: dict | None = None) -> tuple:
     """Evaluate every company, returning ``(results, DataFrame of rows)``."""
     results, rows, failures = {}, [], []
+    payments = payments or {}
     for t, panel in panels.items():
         try:
-            r = evaluate(t, panel, infos.get(t, {}), prices.get(t), macro, cfg)
+            r = evaluate(t, panel, infos.get(t, {}), prices.get(t), macro, cfg, payments.get(t))
         except Exception as exc:  # noqa: BLE001
             failures.append(f'{t}: {type(exc).__name__}: {exc}')
             continue

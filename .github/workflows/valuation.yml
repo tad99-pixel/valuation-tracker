@@ -25,9 +25,10 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120         # the first S&P 500 run downloads ~500 filings
     permissions:
       contents: write          # to push the history store to the data branch
+      issues: write            # to post the run's changes, which notifies you
     steps:
       - uses: actions/checkout@v7
 
@@ -70,6 +71,13 @@ jobs:
             dest="data_cache/macro/$(basename "$f")"
             if [ ! -e "$dest" ]; then cp "$f" "$dest" && touch -d '2000-01-01' "$dest"; fi
           done
+          # Per-class figures read from annual reports (Visa, Berkshire) - kept
+          # on the data branch, since SEC's archive refuses runs without a
+          # contact in VALUATION_USER_AGENT.
+          mkdir -p valuation_state
+          if [ -e _data/share_classes.json ] && [ ! -e valuation_state/share_classes.json ]; then
+            cp _data/share_classes.json valuation_state/
+          fi
 
       - name: Regression tests
         run: python tests/test_valuation.py
@@ -79,6 +87,7 @@ jobs:
           VALUATION_TRACKER: _data/valuation_tracker.xlsx
           VALUATION_USER_AGENT: ${{ secrets.VALUATION_USER_AGENT }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          VALUATION_ALERTS: _alerts.md
         run: python run_valuation.py
 
       - name: Keep downloads for the next run
@@ -95,8 +104,10 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if [ -e ../valuation_state/share_classes.json ]; then cp ../valuation_state/share_classes.json .; fi
           git add -A valuation_tracker_store
           if [ -d valuation_pending ]; then git add -A valuation_pending; fi
+          if [ -e share_classes.json ]; then git add share_classes.json; fi
           if git diff --cached --quiet; then
             echo "History store unchanged."
           else
@@ -104,11 +115,28 @@ jobs:
             git push origin HEAD:data
           fi
 
+      # One rolling issue, labelled tracker-alerts: each run that found a
+      # company moving adds a comment, and GitHub notifies you of it.
+      - name: Post the run's changes
+        if: hashFiles('_alerts.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh issue list --label tracker-alerts --state open --json number --jq '.[0].number')
+          if [ -z "$n" ]; then
+            gh label create tracker-alerts --color 1F6FEB --description "Changes the valuation tracker found" || true
+            gh issue create --label tracker-alerts --title "Valuation tracker: what changed" \
+              --body "Each comment lists the changes one run found. Dashboard: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+            n=$(gh issue list --label tracker-alerts --state open --json number --jq '.[0].number')
+          fi
+          gh issue comment "$n" --body-file _alerts.md
+
       - name: Assemble the site
         run: |
           mkdir -p _site
           cp valuation_dashboard.html _site/index.html
           cp _data/valuation_tracker.xlsx _site/
+          if [ -d valuation_details ]; then cp -r valuation_details _site/; fi
 
       - uses: actions/upload-pages-artifact@v5
         with:

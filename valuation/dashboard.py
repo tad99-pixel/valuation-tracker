@@ -50,6 +50,16 @@ ARCHIVE_DAYS = 30
 # provenance table by key rather than repeated on every row.
 CRITERION_FIELDS = ('key', 'number', 'name', 'verdict', 'display', 'threshold',
                     'detail', 'source_tier', 'structural')
+# Above this many companies, each one's detail - its tests, models, earnings
+# record and history - goes into a small script file of its own beside the
+# page, loaded when its row is opened. The S&P 500 inline would be a page of
+# well over 10 MB; a watchlist inline stays one self-contained file.
+INLINE_LIMIT = 150
+DETAIL_KEYS = ('criteria', 'models', 'consensus_note', 'mos_note', 'caveats', 'fund',
+               'history', 'growth_source')
+DETAILS_DIR = 'valuation_details'
+# The change log shown on the page.
+CHANGES_DAYS = 30
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +162,7 @@ def _company(t: str, r: dict, panel: pd.DataFrame, history: list) -> dict:
         'implied_growth': rev.get('value') if rev.get('applicable') else None,
         'implied_at_bound': bool((rev.get('detail') or {}).get('at_bound')),
         'implied_range': (rev.get('detail') or {}).get('range') if rev.get('applicable') else None,
+        'equity_rate': (rev.get('detail') or {}).get('rate') or dcf_d.get('rate'),
         'credited_growth': dcf_d.get('growth_stage1'),
         'oe_growth': s.get('owner_earnings_cagr'),
         'rev_growth': s.get('revenue_cagr'),
@@ -173,16 +184,34 @@ def _company(t: str, r: dict, panel: pd.DataFrame, history: list) -> dict:
     }
 
 
+def _recent_changes(changes: pd.DataFrame | None, days: int = CHANGES_DAYS,
+                    cap: int = 400) -> list:
+    """The change log's last `days` days, newest first, without first evaluations."""
+    if changes is None or changes.empty or 'date' not in changes.columns:
+        return []
+    c = changes.reindex(columns=['date', 'Ticker', 'change', 'before', 'after', 'detail']).copy()
+    c['date'] = pd.to_datetime(c['date'])
+    c = c[(c['date'] >= pd.Timestamp.today().normalize() - pd.Timedelta(days=days))
+          & (c['change'] != 'new')]
+    c = c.sort_values('date', ascending=False, kind='stable').head(cap)
+    return [{'d': r.date, 't': r.Ticker, 'change': r.change, 'before': r.before,
+             'after': r.after, 'detail': r.detail} for r in c.itertuples()]
+
+
 def build_payload(results: dict, panels: dict, macro: dict,
-                  history: pd.DataFrame | None, cfg: ValuationConfig) -> dict:
-    """The page's data. `history` is the tracker store's History table."""
+                  history: pd.DataFrame | None, cfg: ValuationConfig,
+                  changes: pd.DataFrame | None = None, lists: dict | None = None) -> dict:
+    """The page's data. `history` and `changes` are the tracker store's
+    tables; `lists` maps each ticker to the watchlists it came from."""
     hist = _history_by_ticker(history)
     companies = []
     for t, r in results.items():
         panel = r.get('panel_used')
         if panel is None:
             panel = panels.get(t)
-        companies.append(_company(t, r, panel, hist.get(t, [])))
+        c = _company(t, r, panel, hist.get(t, []))
+        c['lists'] = (lists or {}).get(t, [])
+        companies.append(c)
     return _j({
         # UTC, stated: the page is built on a Singapore laptop and on a cloud
         # runner, and an unlabelled time is wrong for one of them.
@@ -204,6 +233,7 @@ def build_payload(results: dict, panels: dict, macro: dict,
         },
         'verdicts': [{'label': label, 'status': st, 'candidate': cand}
                      for label, _, st, cand in VERDICTS],
+        'changes': _recent_changes(changes),
         'companies': companies,
         'tiers': SOURCE_TIERS,
         'provenance': [{'key': k, 'tier': v[0], 'citation': v[1]}
@@ -222,6 +252,12 @@ def render(payload: dict, path=DASHBOARD_PATH, archive: bool = True):
     becomes \\u003c, so a company name containing `</script>` - or anything a
     filing might plausibly carry - cannot terminate the block early.
     """
+    payload = dict(payload)
+    lazy = len(payload.get('companies') or []) > INLINE_LIMIT
+    details_dir = path.parent / DETAILS_DIR
+    if lazy:
+        payload['companies'] = _write_details(payload['companies'], details_dir)
+        payload['details'] = DETAILS_DIR + '/'
     blob = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
     blob = blob.replace('<', '\\u003c').replace('>', '\\u003e').replace('&', '\\u0026')
     shell = _TEMPLATE.replace('/*__CSS__*/', _CSS).replace('/*__JS__*/', _JS)
@@ -232,12 +268,36 @@ def render(payload: dict, path=DASHBOARD_PATH, archive: bool = True):
         return shell.replace('__WORKBOOK__', workbook_href).replace('/*__DATA__*/', blob)
 
     path.write_text(page('valuation_tracker.xlsx'), encoding='utf-8')
-    if archive:
+    # An archived copy must stand on its own; with its details in files that
+    # the next run overwrites, it would show today's detail under an old
+    # date. The history store keeps every run either way.
+    if archive and not lazy:
         stamp = datetime.now().strftime('%Y%m%d')
         (REPORT_DIR / f'valuation_dashboard_{stamp}.html').write_text(
             page('../valuation_tracker.xlsx'), encoding='utf-8')
+    if archive:
         prune_archive(REPORT_DIR)
     return path
+
+
+def _write_details(companies: list, folder) -> list:
+    """Move each company's detail into `folder/<ticker>.js` and return the
+    summaries. A script file, not JSON, so the page can load it with a
+    <script> tag - which, unlike fetch(), also works opened from disk."""
+    folder.mkdir(parents=True, exist_ok=True)
+    for old in folder.glob('*.js'):
+        old.unlink()
+    out = []
+    for c in companies:
+        c = dict(c)
+        detail = {k: c.pop(k) for k in DETAIL_KEYS if k in c}
+        c['file'] = re.sub(r'[^A-Za-z0-9_-]', '_', c['t']) + '.js'
+        body = json.dumps(detail, separators=(',', ':'), ensure_ascii=False)
+        body = body.replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
+        (folder / c['file']).write_text(
+            f'window.VT_DETAIL({json.dumps(c["t"])},{body});\n', encoding='utf-8')
+        out.append(c)
+    return out
 
 
 def prune_archive(folder, keep_days: int = ARCHIVE_DAYS, today: date | None = None) -> list:
@@ -290,10 +350,12 @@ _TEMPLATE = """<!doctype html>
     <button type="button" id="theme" class="ghost" aria-label="Toggle light or dark theme">Theme</button>
   </header>
   <p class="asof" id="asof"></p>
+  <div class="notice stale" id="stale" role="status" hidden></div>
 
   <section class="filters" aria-label="Filters">
     <label class="f-search"><span class="vh">Search</span>
       <input id="f-q" type="search" placeholder="Ticker or name" autocomplete="off"></label>
+    <label id="f-list-wrap" hidden><span class="f-lbl">List</span><select id="f-list"></select></label>
     <label><span class="f-lbl">Verdict</span><select id="f-verdict"></select></label>
     <label><span class="f-lbl">Type</span><select id="f-group"></select></label>
     <label class="f-check"><input id="f-measured" type="checkbox"> Margin measured only</label>
@@ -301,6 +363,16 @@ _TEMPLATE = """<!doctype html>
   </section>
 
   <section class="kpis" id="kpis" aria-label="Headline figures"></section>
+
+  <section class="card" id="card-changes">
+    <header class="card-h">
+      <div>
+        <h2>What changed</h2>
+        <p class="card-sub">The last 30 days of the change log for the companies in view: verdicts, margin bands, and the price crossing its estimated value, the Graham Number or two-thirds of net current assets. A change caused by new rules rather than by the company is marked as such.</p>
+      </div>
+    </header>
+    <div class="table-wrap" id="changes"></div>
+  </section>
 
   <section class="card" id="card-value">
     <header class="card-h">
@@ -546,6 +618,12 @@ tr.na td.why { color: var(--ink-3); }
 .method li b { color: var(--ink-1); font-weight: 600; }
 .foot { color: var(--ink-3); font-size: 12px; margin-top: 18px; max-width: 80ch; }
 .foot a { color: var(--accent); }
+.notice.stale { margin: -6px 0 16px; border-left-color: var(--critical); }
+table.chg td { font-size: 12px; }
+table.chg a { color: var(--accent); font-weight: 600; text-decoration: none; }
+table.chg a:hover { text-decoration: underline; }
+tr.chg-rule td { color: var(--ink-3); }
+.chg-more { color: var(--ink-3); font-size: 12px; margin: 8px 0 0; }
 
 @media (max-width: 860px) {
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -570,6 +648,7 @@ _JS = r"""
   var DATA = JSON.parse(document.getElementById('data').textContent);
   var ALL = DATA.companies || [];
   var SVGNS = 'http://www.w3.org/2000/svg';
+  var CHART_ROWS = 60;
 
   // ---------- dom helpers: every string goes in as text, never markup ----------
   function h(tag, attrs) {
@@ -715,11 +794,12 @@ _JS = r"""
   }
 
   // ---------- state ----------
-  var state = { q: '', verdict: '', group: '', measured: false, sortKey: 'p2v', sortDir: 1, open: null };
+  var state = { q: '', list: '', verdict: '', group: '', measured: false, sortKey: 'p2v', sortDir: 1, open: null };
   function filtered() {
     var q = state.q.trim().toLowerCase();
     return ALL.filter(function (c) {
       if (q && (c.t || '').toLowerCase().indexOf(q) < 0 && (c.name || '').toLowerCase().indexOf(q) < 0) return false;
+      if (state.list && (c.lists || []).indexOf(state.list) < 0) return false;
       if (state.verdict && c.verdict !== state.verdict) return false;
       if (state.group && c.group !== state.group) return false;
       if (state.measured && c.mos_verdict !== 'MEASURED') return false;
@@ -738,13 +818,28 @@ _JS = r"""
     if (isNum(m.treasury_10y)) parts.push('10-year Treasury ' + m.treasury_10y.toFixed(2) + '%');
     parts.push(isNum(m.cpi_ratio) ? 'CPI ×' + m.cpi_ratio.toFixed(1) + ' since ' + m.cpi_base_year + (m.cpi_asof ? ' (' + String(m.cpi_asof).slice(0, 7) + ')' : '')
       : 'CPI unavailable, so Graham’s size test is not measured');
-    if (isNum(p.discount_rate)) parts.push('discount rate ' + (p.discount_rate * 100).toFixed(0) + '%');
+    if (isNum(p.discount_rate)) parts.push('required return ' + (p.discount_rate * 100).toFixed(0) + '% before debt');
     parts.push('config ' + DATA.config_version);
     $('#asof').textContent = parts.join(' · ');
     $('#growth-sub').textContent =
       'The reverse DCF: the growth rate today’s price needs for ' + (p.stage1_years || 10) +
-      ' years at a ' + ((p.discount_rate || 0.09) * 100).toFixed(0) + '% discount rate, against the growth the record supports ' +
-      '(the lower of owner-earnings and revenue growth, never crediting growth that came from buybacks, capped at ' + Math.round(((DATA.params || {}).max_stage1_growth || 0.15) * 100) + '%). Sorted by the gap. It needs no growth forecast, but it does move with the discount rate: each row’s tooltip gives the rate one point either side.';
+      ' years at each company’s equity rate (' + ((p.discount_rate || 0.09) * 100).toFixed(0) + '% required of the business, more where it carries debt), against the growth the record supports ' +
+      '(the lower of owner-earnings and revenue growth, never crediting growth that came from buybacks, capped at ' + Math.round((p.max_stage1_growth || 0.15) * 100) + '%). Sorted by the gap. It needs no growth forecast, but it does move with the discount rate: each row’s tooltip gives the rate one point either side.';
+  }
+
+  // A page that stopped updating keeps showing its numbers as if current;
+  // past four days - a weekend and then some - it says so.
+  function renderStale() {
+    var m = String(DATA.generated || '').match(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})/);
+    if (!m) return;
+    var days = (Date.now() - new Date(m[1] + 'T' + m[2] + ':00Z').getTime()) / 86400000;
+    if (!(days >= 4)) return;
+    var el = $('#stale');
+    el.textContent = '';
+    el.appendChild(h('b', { text: 'Out of date: ' }));
+    el.appendChild(document.createTextNode('these figures were generated ' + Math.floor(days) + ' days ago, on ' + m[1] +
+      '. The tracker normally runs every weekday, so its scheduled run has stopped or is failing.'));
+    el.hidden = false;
   }
 
   function setupFilters() {
@@ -756,6 +851,15 @@ _JS = r"""
     var gs = $('#f-group');
     gs.appendChild(h('option', { value: '', text: 'All' }));
     groups.forEach(function (g) { gs.appendChild(h('option', { value: g, text: GROUP_LABEL[g] || g })); });
+    // Lists the companies came from (the watchlist, an index); shown only
+    // when there is more than one to choose between.
+    var lists = Array.from(new Set([].concat.apply([], ALL.map(function (c) { return c.lists || []; }))))
+      .sort(function (a, b) { return (a === 'Watchlist' ? -1 : b === 'Watchlist' ? 1 : a.localeCompare(b)); });
+    var ls = $('#f-list');
+    ls.appendChild(h('option', { value: '', text: 'All' }));
+    lists.forEach(function (l) { ls.appendChild(h('option', { value: l, text: l })); });
+    $('#f-list-wrap').hidden = lists.length < 2;
+    ls.addEventListener('change', function (e) { state.list = e.target.value; renderAll(); });
     $('#f-q').addEventListener('input', function (e) { state.q = e.target.value; renderAll(); });
     vs.addEventListener('change', function (e) { state.verdict = e.target.value; renderAll(); });
     gs.addEventListener('change', function (e) { state.group = e.target.value; renderAll(); });
@@ -804,6 +908,9 @@ _JS = r"""
       .sort(function (a, b) { return a.p2v - b.p2v; });
     var skipped = rows.length - items.length;
     if (!items.length) { host.appendChild(h('p', { class: 'empty', text: 'No company in this view has both a price and a value estimate.' })); renderValueTable(items); return; }
+    // One row per company stops being readable long before 500 companies.
+    var all = items;
+    items = items.slice(0, CHART_ROWS);
 
     var W = Math.max(320, host.clientWidth || 800);
     var narrow = W < 600;
@@ -877,8 +984,9 @@ _JS = r"""
       svg.appendChild(g);
     });
     host.appendChild(svg);
+    if (all.length > items.length) host.appendChild(h('p', { class: 'empty', text: 'Showing the ' + items.length + ' lowest price to value of ' + all.length + '. The table view and the scorecard have every one.' }));
     if (skipped) host.appendChild(h('p', { class: 'empty', text: skipped + ' compan' + (skipped === 1 ? 'y has' : 'ies have') + ' no value estimate or no price and ' + (skipped === 1 ? 'is' : 'are') + ' listed only in the scorecard.' }));
-    renderValueTable(items);
+    renderValueTable(all);
   }
 
   function simpleTable(cols, rows) {
@@ -926,6 +1034,8 @@ _JS = r"""
       .map(function (c) { return { c: c, gap: c.implied_growth - c.credited_growth }; })
       .sort(function (a, b) { return b.gap - a.gap; });
     if (!items.length) { host.appendChild(h('p', { class: 'empty', text: 'No company in this view has both a reverse DCF and a supported growth rate.' })); renderGrowthTable(items); return; }
+    var all = items;
+    items = items.slice(0, CHART_ROWS);
     var W = Math.max(320, host.clientWidth || 800);
     var narrow = W < 600;
     var labelW = narrow ? 58 : 120, valW = 74, rowH = 28, top = 14, bottom = 30;
@@ -958,11 +1068,11 @@ _JS = r"""
       g.appendChild(s('circle', { class: 'd-impl', cx: xb, cy: yc, r: 5 }));
       g.appendChild(s('text', { class: 'val', x: W - 2, y: yc + 4, 'text-anchor': 'end', text: fmt.pts(it.gap) }));
       function over(e) {
-        var r = (DATA.params || {}).discount_rate || 0.09;
+        var r = isNum(c.equity_rate) ? c.equity_rate : ((DATA.params || {}).discount_rate || 0.09);
         showTip(e, g, c.t + ' · ' + (c.name || ''), [
-          { v: (c.implied_at_bound ? (c.implied_growth > 0 ? '≥ ' : '≤ ') : '') + fmt.pct(c.implied_growth, true), l: 'implied by the price', key: impl },
+          { v: (c.implied_at_bound ? (c.implied_growth > 0 ? '≥ ' : '≤ ') : '') + fmt.pct(c.implied_growth, true), l: 'implied by the price at ' + fmt.pct(r), key: impl },
           c.implied_range ? { v: fmt.pct(c.implied_range[0], true) + ' to ' + fmt.pct(c.implied_range[1], true),
-            l: 'implied at ' + Math.round((r - 0.01) * 100) + '% to ' + Math.round((r + 0.01) * 100) + '% discount' } : null,
+            l: 'implied at ' + fmt.pct(r - 0.01) + ' to ' + fmt.pct(r + 0.01) } : null,
           { v: fmt.pct(c.credited_growth, true), l: 'supported by the record', key: hist },
           { v: fmt.pts(it.gap), l: 'gap' },
           { v: fmt.pct(c.oe_growth, true), l: 'owner earnings, before the cap' },
@@ -973,7 +1083,8 @@ _JS = r"""
       svg.appendChild(g);
     });
     host.appendChild(svg);
-    renderGrowthTable(items);
+    if (all.length > items.length) host.appendChild(h('p', { class: 'empty', text: 'Showing the ' + items.length + ' largest gaps of ' + all.length + '. The table view has every one.' }));
+    renderGrowthTable(all);
   }
   function renderGrowthTable(items) {
     var host = $('#tv-growth'); host.textContent = '';
@@ -1060,7 +1171,13 @@ _JS = r"""
       tb.appendChild(row);
       if (open) {
         var d = h('tr', { class: 'drow' }); var td = h('td', { colspan: COLS.length + 1 });
-        td.appendChild(detail(c)); d.appendChild(td); tb.appendChild(d);
+        if (needsDetail(c)) {
+          td.appendChild(h('p', { class: 'empty', style: 'padding: 12px 14px', text: 'Loading ' + c.t + '…' }));
+          loadDetail(c, function () { if (state.open === c.t) renderScore(filtered()); });
+        } else {
+          td.appendChild(detail(c));
+        }
+        d.appendChild(td); tb.appendChild(d);
       }
     });
     if (!rows.length) tb.appendChild(h('tr', null, h('td', { colspan: COLS.length + 1, class: 'muted', text: 'No company matches the filters.' })));
@@ -1068,14 +1185,35 @@ _JS = r"""
     // charts inside an open detail need the laid-out width
     if (state.open) {
       var oc = ALL.filter(function (x) { return x.t === state.open; })[0];
-      if (oc) { renderEps(document.getElementById('eps-' + oc.t), oc); renderHistory(document.getElementById('hist-' + oc.t), oc); }
+      if (oc && !needsDetail(oc) && !oc.detail_error) { renderEps(document.getElementById('eps-' + oc.t), oc); renderHistory(document.getElementById('hist-' + oc.t), oc); }
     }
+  }
+
+  // ---------- details on demand ----------
+  // With many companies each one's detail sits in its own script file
+  // (DATA.details), which calls VT_DETAIL when it loads. A <script> tag
+  // rather than fetch(), so it also works with the page opened from disk.
+  var waiting = {};
+  window.VT_DETAIL = function (t, d) {
+    var c = ALL.filter(function (x) { return x.t === t; })[0];
+    if (c) Object.keys(d).forEach(function (k) { c[k] = d[k]; });
+    var done = waiting[t]; delete waiting[t];
+    if (done) done();
+  };
+  function needsDetail(c) { return !!(DATA.details && c.file && !c.criteria && !c.detail_error); }
+  function loadDetail(c, done) {
+    if (waiting[c.t]) { waiting[c.t] = done; return; }
+    waiting[c.t] = done;
+    var el = document.createElement('script');
+    el.src = DATA.details + c.file;
+    el.onerror = function () { c.detail_error = true; var f = waiting[c.t]; delete waiting[c.t]; if (f) f(); };
+    document.head.appendChild(el);
   }
   // Open a company's detail from a chart, clearing any filter that hides it.
   function openDetail(t) {
     state.open = t;
     var c = ALL.filter(function (x) { return x.t === t; })[0];
-    if (c && filtered().indexOf(c) < 0) { state.q = ''; state.verdict = ''; state.group = ''; state.measured = false; $('#f-q').value = ''; $('#f-verdict').value = ''; $('#f-group').value = ''; $('#f-measured').checked = false; renderAll(); }
+    if (c && filtered().indexOf(c) < 0) { state.q = ''; state.list = ''; state.verdict = ''; state.group = ''; state.measured = false; $('#f-q').value = ''; $('#f-list').value = ''; $('#f-verdict').value = ''; $('#f-group').value = ''; $('#f-measured').checked = false; renderAll(); }
     else renderScore(filtered());
     var r = document.querySelector('tr.srow[data-t="' + CSS.escape(t) + '"]');
     if (r) { r.scrollIntoView({ behavior: 'smooth', block: 'start' }); r.focus({ preventScroll: true }); }
@@ -1090,6 +1228,11 @@ _JS = r"""
           (c.n_years || 0) + ' fiscal years on file, latest ' + fmt.year(c.last_fy),
           'price as of ' + (c.price_date || '—')].filter(Boolean).join(' · ') })),
       verdictBadge(c.verdict)));
+    if (c.detail_error) {
+      wrap.appendChild(h('div', { class: 'notice' }, h('b', { text: 'Detail unavailable: ' }),
+        'the file with this company’s tests and models (' + DATA.details + c.file + ') could not be loaded. It is written beside the page on every run.'));
+      return wrap;
+    }
     if (c.caveats && c.caveats.length) {
       var n = h('div', { class: 'notice' }, h('b', { text: 'Read with care: ' }), c.caveats.join('; ') + '.');
       wrap.appendChild(n);
@@ -1252,7 +1395,7 @@ _JS = r"""
     var ol = h('ol');
     [
       ['Three results, not two. ', 'A test is Pass, Fail, or N/A. N/A means either the data is missing, or the test does not apply to this kind of company — a current ratio for a bank. Neither is ever counted as a failure.'],
-      ['The estimate is a median of earnings-based models. ', 'A DCF on per-share owner earnings, earnings power value with no growth credited, and fifteen times average EPS; for banks and insurers, a justified price-to-book. The Graham Number and net current asset value are price limits from Graham’s rules, shown separately, not estimates of worth.'],
+      ['The estimate is a median of models that capitalise earnings at the required return. ', 'A DCF on owner earnings, and earnings power value with no growth credited; for banks and insurers, a justified price-to-book and average earnings at the required return. The required return is ' + Math.round(((DATA.params || {}).discount_rate || 0.09) * 100) + '% of the business, and more of the equity of a company with debt. Graham’s ceilings — fifteen times average earnings, the Graham Number, net current assets — are price limits, shown separately, not estimates of worth.'],
       ['A margin of safety has to be earned. ', 'It is reported only when at least two models apply and the highest is within ' + spreadLimit() + '× of the lowest. Otherwise it is withheld and scores zero, the same as a premium: a margin that cannot be demonstrated is not a margin.'],
       ['Read “what the price assumes” first. ', 'The forward models depend on a growth forecast; the reverse DCF does not. It states the growth today’s price needs and sets it beside what the business has actually done, never crediting growth that came from buying back its own shares. It does depend on the discount rate, so the rate one point either side is shown too: a conclusion that holds across that range is a finding, one that flips inside it is not.'],
       ['The composite score only sorts the list. ', 'Neither Graham nor Buffett weighted their tests into one number. The per-test tables in each company’s detail are the analysis.']
@@ -1279,9 +1422,40 @@ _JS = r"""
   }
 
   // ---------- wiring ----------
+  // ---------- what changed ----------
+  function renderChanges(rows) {
+    var host = $('#changes'); host.textContent = '';
+    var inView = {};
+    rows.forEach(function (c) { inView[c.t] = true; });
+    var items = (DATA.changes || []).filter(function (x) { return inView[x.t]; });
+    if (!items.length) {
+      host.appendChild(h('p', { class: 'empty', text: (DATA.changes || []).length
+        ? 'No change in the last 30 days for the companies in view.' : 'No change in the last 30 days.' }));
+      return;
+    }
+    var shown = items.slice(0, 40);
+    var t = h('table', { class: 'chg' });
+    t.appendChild(h('thead', null, h('tr', null, ['Date', 'Company', 'Change', 'Before', 'After', 'Detail']
+      .map(function (x) { return h('th', { text: x }); }))));
+    var tb = h('tbody');
+    shown.forEach(function (x) {
+      var rule = String(x.change || '').indexOf('(rules') >= 0;
+      tb.appendChild(h('tr', { class: rule ? 'chg-rule' : null },
+        h('td', { class: 'nw', text: x.d || '' }),
+        h('td', null, h('a', { href: '#', text: x.t, onclick: function (e) { e.preventDefault(); openDetail(x.t); } })),
+        h('td', { text: x.change || '' }), h('td', { text: x.before || '—' }),
+        h('td', { text: x.after || '—' }), h('td', { class: 'why', text: x.detail || '' })));
+    });
+    t.appendChild(tb);
+    host.appendChild(t);
+    if (items.length > shown.length) host.appendChild(h('p', { class: 'chg-more',
+      text: (items.length - shown.length) + ' more in the workbook’s Changes sheet.' }));
+  }
+
   function renderAll() {
     var rows = filtered();
     renderKpis(rows);
+    renderChanges(rows);
     renderValueChart(rows);
     renderGrowthChart(rows);
     renderScore(rows);
@@ -1312,6 +1486,7 @@ _JS = r"""
   window.addEventListener('resize', function () { clearTimeout(resizeT); resizeT = setTimeout(renderAll, 150); });
 
   renderAsOf();
+  renderStale();
   setupFilters();
   setupTheme();
   setupTableViews();

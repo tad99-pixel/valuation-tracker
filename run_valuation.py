@@ -47,10 +47,12 @@ if sys.stdout is None or sys.stderr is None:
 
 import pandas as pd  # noqa: E402
 
+import os  # noqa: E402
+
+from valuation import classes, fundamentals, score, sources, tracker  # noqa: E402
 from valuation import dashboard as dash  # noqa: E402
-from valuation import fundamentals, score, sources, tracker  # noqa: E402
 from valuation.config import (CONFIG_VERSION, DEFAULT, LOG_PATH, ROOT,  # noqa: E402
-                              TRACKER_PATH)
+                              SHARE_CLASSES, TRACKER_PATH)
 
 log = logging.getLogger('valuation')
 DEFAULT_WATCHLIST = ROOT / 'valuation_watchlist.txt'
@@ -68,29 +70,65 @@ def setup_logging(verbose: bool = True) -> None:
         log.addHandler(sh)
 
 
-def read_watchlist(path: Path) -> list:
-    """One ticker per line; `#` starts a comment; blank lines ignored."""
+def read_watchlist(path: Path, with_lists: bool = False):
+    """Tickers from a watchlist file.
+
+    One ticker per line; `#` starts a comment; blank lines are ignored. A line
+    `@sp500` or `@sp600` adds every constituent of that index. With
+    `with_lists`, also returns ``{ticker: [lists it came from]}`` - "Watchlist"
+    for a line of its own, the index's name for a constituent - which the
+    dashboard filters on.
+    """
     if not path.exists():
         raise FileNotFoundError(
             f'{path} not found. Create it with one ticker per line, or pass '
             '--tickers / --universe.')
-    out = []
-    for line in path.read_text(encoding='utf-8').splitlines():
+    lists: dict = {}
+    # utf-8-sig: a file saved with a byte-order mark (Notepad can) otherwise
+    # turns its first line into a ticker made of an invisible character.
+    for line in path.read_text(encoding='utf-8-sig').splitlines():
         t = line.split('#', 1)[0].strip()
-        if t:
-            out.append(t.upper().replace('.', '-'))
-    return list(dict.fromkeys(out))
+        if not t:
+            continue
+        if t.startswith('@'):
+            name = t[1:].lower()
+            if name not in sources.INDEX_NAMES:
+                raise ValueError(f'{path.name}: unknown list {t!r} - use @sp500 or @sp600')
+            for c in sources.index_constituents(name):
+                lists.setdefault(c, []).append(sources.INDEX_NAMES[name])
+        else:
+            lists.setdefault(t.upper().replace('.', '-'), []).append('Watchlist')
+    tickers = list(lists)
+    return (tickers, lists) if with_lists else tickers
 
 
 def universe_tickers(name: str) -> list:
-    """Index constituents, via the scanner's universe loader."""
-    try:
-        from scanner.config import get_config
-        from scanner.data import get_universe
-    except ImportError as exc:
-        raise SystemExit('--universe needs the scanner package, which is not part of this '
-                         'checkout; list the tickers in valuation_watchlist.txt instead') from exc
-    return get_universe(get_config(name))['Symbol'].tolist()
+    """Every constituent of an index (`sp500`, `sp600`)."""
+    return sources.index_constituents(name)
+
+
+def write_alerts(changes: pd.DataFrame | None, path: Path) -> int:
+    """The run's changes that are news, as markdown for the workflow to post.
+
+    News means a company moved: not a first evaluation, and not a change of
+    rules. Returns how many were written; writes nothing when there are none.
+    """
+    if changes is None or changes.empty:
+        return 0
+    real = changes[(changes['change'] != 'new')
+                   & ~changes['change'].str.contains('(rules', regex=False)]
+    if real.empty:
+        return 0
+
+    def cell(v):
+        return '' if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).replace('|', '/')
+    rows = ['| Company | Change | Before | After | Detail |', '|---|---|---|---|---|']
+    rows += [f'| {cell(c.Ticker)} | {cell(c.change)} | {cell(c.before)} | {cell(c.after)} | '
+             f'{cell(c.detail)} |' for c in real.itertuples()]
+    day = pd.Timestamp(real['date'].iloc[0]).strftime('%Y-%m-%d')
+    path.write_text(f'{len(real)} change(s) in the {day} run:\n\n' + '\n'.join(rows) + '\n',
+                    encoding='utf-8')
+    return len(real)
 
 
 def main(argv=None) -> int:
@@ -115,13 +153,13 @@ def main(argv=None) -> int:
 
     if args.tickers:
         tickers = [t.strip().upper().replace('.', '-') for t in args.tickers.split(',') if t.strip()]
-        label = 'ad hoc'
+        lists, label = {t: ['Ad hoc'] for t in tickers}, 'ad hoc'
     elif args.universe:
         tickers = universe_tickers(args.universe)
-        label = args.universe
+        lists, label = {t: [sources.INDEX_NAMES[args.universe]] for t in tickers}, args.universe
     else:
         path = args.watchlist or DEFAULT_WATCHLIST
-        tickers = read_watchlist(path)
+        tickers, lists = read_watchlist(path, with_lists=True)
         label = path.stem
     if args.limit:
         tickers = tickers[:args.limit]
@@ -153,14 +191,23 @@ def main(argv=None) -> int:
     # 49 companies and would not fit in memory for the S&P 500. A panel built
     # from the same document, splits and code last run is reused unparsed.
     splits = sources.get_splits(tickers, force=args.force, verbose=verbose)
+    # Multi-class filers: their per-share figures come from each annual
+    # report's own XBRL, read once and kept (see valuation/classes.py).
+    with_classes = [t for t in tickers if t in SHARE_CLASSES]
+    if with_classes:
+        classes.refresh(sources.resolve_ciks(with_classes, verbose=False)[0],
+                        pause=cfg.sec_pause, verbose=verbose)
 
     def key_for(t, sha1, meta):
-        return fundamentals.entry_key(sha1, splits.get(t), meta, cfg)
+        extra = classes.signature(t)
+        return fundamentals.entry_key(f'{sha1}+{extra}' if sha1 and extra else sha1,
+                                      splits.get(t), meta, cfg)
 
     built = sources.fetch_many(
         tickers, cfg, force=args.force, verbose=verbose,
         consume=lambda t, blob: fundamentals.build_entry(
-            t, blob, cfg, splits.get(t), key=key_for(t, blob['sha1'], blob['meta'])),
+            t, classes.inject(blob, t), cfg, splits.get(t),
+            key=key_for(t, blob['sha1'], blob['meta'])),
         prebuilt=None if args.force else (lambda t, ref, meta: fundamentals.cached_entry(
             t, key_for(t, ref.sha1, meta), cfg, source=ref.source)))
     if not built:
@@ -173,7 +220,9 @@ def main(argv=None) -> int:
     prices = sources.get_prices(list(panels), years=12, force=args.force, verbose=verbose)
 
     log.info('[4/5] evaluate')
-    results, latest = score.evaluate_all(panels, infos, prices, macro, cfg, verbose=verbose)
+    payments = sources.get_dividends(list(panels))
+    results, latest = score.evaluate_all(panels, infos, prices, macro, cfg, verbose=verbose,
+                                         payments=payments)
     if latest.empty:
         log.error('nothing could be evaluated')
         return 5
@@ -202,9 +251,15 @@ def main(argv=None) -> int:
                 for _, c in real.head(15).iterrows():
                     log.info(f'    {c["Ticker"]:<6} {c["change"]:<24} '
                              f'{c["before"]} -> {c["after"]}')
+        # On GitHub the workflow posts these to an issue, which notifies you.
+        if os.environ.get('VALUATION_ALERTS'):
+            n = write_alerts(changes, Path(os.environ['VALUATION_ALERTS']))
+            if n:
+                log.info(f'  {n} change(s) written for the alert')
 
     if not args.no_dashboard:
-        payload = dash.build_payload(results, panels, macro, store.get('History'), cfg)
+        payload = dash.build_payload(results, panels, macro, store.get('History'), cfg,
+                                     changes=store.get('Changes'), lists=lists)
         path = dash.render(payload)
         log.info(f'  dashboard: {path.name}')
         if args.open:
