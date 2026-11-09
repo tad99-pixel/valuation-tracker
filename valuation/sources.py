@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-from .config import FACTS_DIR, MACRO_DIR, STATE_DIR, ValuationConfig
+from .config import CIK_SUCCESSIONS, FACTS_DIR, MACRO_DIR, STATE_DIR, ValuationConfig
 
 warnings.filterwarnings('ignore')
 
@@ -341,6 +341,53 @@ class FactsRef:
             return json.load(fh)
 
 
+def cik_family(cik: int) -> list:
+    """Every registration of the company `cik` belongs to, current one first.
+
+    Works from any member, so a ticker map that still points at the old
+    registration is moved to the new one rather than read as a company that
+    stopped filing.
+    """
+    for current, earlier in CIK_SUCCESSIONS.items():
+        if cik == current or cik in earlier:
+            return [current, *earlier]
+    return [cik]
+
+
+def merge_facts(docs: list) -> dict:
+    """One companyfacts document from a company's successive registrations.
+
+    Every fact from every registration, side by side: `fundamentals` already
+    keeps the most recently filed value for each period, so where the new
+    registration restates a year the old one filed, the restatement wins -
+    exactly as it does for any restatement within one registration.
+    """
+    out = {'cik': docs[0].get('cik'), 'entityName': docs[0].get('entityName'), 'facts': {}}
+    for doc in docs:
+        for taxonomy, concepts in (doc.get('facts') or {}).items():
+            into = out['facts'].setdefault(taxonomy, {})
+            for name, node in concepts.items():
+                units = into.setdefault(name, {'units': {}})['units']
+                for unit, rows in (node.get('units') or {}).items():
+                    units.setdefault(unit, []).extend(rows)
+    return out
+
+
+class MergedFacts:
+    """Several registrations' documents, read as one company's (`cik_family`)."""
+
+    def __init__(self, refs: list):
+        self.refs, self.cik = refs, refs[0].cik
+        self.sha1 = (hashlib.sha1('+'.join(r.sha1 for r in refs).encode()).hexdigest()
+                     if all(r.sha1 for r in refs) else None)
+        # The least current part decides how the whole is labelled.
+        self.source = next(s for s in ('stale-cache', 'network', 'cache')
+                           if any(r.source == s for r in refs))
+
+    def load(self) -> dict:
+        return merge_facts([r.load() for r in self.refs])
+
+
 def fetch_companyfacts(cik: int, cfg: ValuationConfig, force: bool = False,
                        latest_filing=None) -> tuple:
     """Make the cached companyfacts document current: ``(FactsRef | None, source)``.
@@ -450,6 +497,8 @@ def fetch_many(tickers, cfg: ValuationConfig, force: bool = False,
     for i, (t, cik) in enumerate(ciks.items(), 1):
         if verbose and i % 25 == 0:
             print(f'    fundamentals {i}/{len(ciks)}', end='\r')
+        family = cik_family(cik)
+        cik = family[0]                 # the current registration owns the metadata
         meta = fetch_submissions(cik, cfg, force=force)
         if meta is None:
             # The SIC code decides the bank / insurer / REIT carve-outs.
@@ -465,12 +514,19 @@ def fetch_many(tickers, cfg: ValuationConfig, force: bool = False,
             # "ETF" or "TRUST" in a name both missed funds and caught REITs.
             declined.append(f'{t} ({etype})')
             continue
-        ref, source = fetch_companyfacts(cik, cfg, force=force,
-                                         latest_filing=meta.get('latest_filing'))
-        if ref is None:
+        refs, source = [], None
+        for c in family:
+            m = meta if c == cik else (fetch_submissions(c, cfg, force=force) or {})
+            r, s = fetch_companyfacts(c, cfg, force=force, latest_filing=m.get('latest_filing'))
+            if r is not None:
+                refs.append(r)
+            elif c == cik:
+                source = s
+        if not refs:
             failed.append(f'{t} ({source})')
             continue
-        seen[source] += 1
+        ref = refs[0] if len(refs) == 1 else MergedFacts(refs)
+        seen[ref.source] += 1
         if prebuilt is not None:
             hit = prebuilt(t, ref, meta)
             if hit is not None:
@@ -480,11 +536,12 @@ def fetch_many(tickers, cfg: ValuationConfig, force: bool = False,
         try:
             facts = ref.load()
         except Exception as exc:  # noqa: BLE001
-            # Corrupt on disk: drop the sidecar so the next run refetches it.
-            _facts_meta_path(cik).unlink(missing_ok=True)
+            # Corrupt on disk: drop the sidecars so the next run refetches.
+            for c in family:
+                _facts_meta_path(c).unlink(missing_ok=True)
             failed.append(f'{t} (cached facts unreadable: {exc})')
             continue
-        blob = {'cik': cik, 'facts': facts, 'meta': meta, 'source': source,
+        blob = {'cik': cik, 'facts': facts, 'meta': meta, 'source': ref.source,
                 'sha1': ref.sha1}
         out[t] = consume(t, blob) if consume is not None else blob
         del facts, blob, ref
@@ -506,20 +563,33 @@ def fetch_many(tickers, cfg: ValuationConfig, force: bool = False,
 # Macro: AAA yield for Graham's relative tests, CPI for his dollar thresholds
 # ---------------------------------------------------------------------------
 
-def _fred_series(series_id: str, max_age_days: int = 3):
-    """One FRED series as a Series indexed by date, cached to parquet."""
+def _fred_series(series_id: str, max_age_days: int = 3) -> tuple:
+    """One FRED series as a Series indexed by date, cached to parquet.
+
+    Returns ``(series, problem)``. `problem` says why a fresh copy could not
+    be had, and `series` is then the last cached one, or None. It used to
+    fail silently, which on a new machine read as "AAA unavailable" with no
+    way to tell a blocked request from a network outage.
+    """
     p = MACRO_DIR / f'{series_id}.parquet'
-    if p.exists():
+
+    def cached():
         try:
-            if (time.time() - p.stat().st_mtime) / 86400.0 <= max_age_days:
-                s = pd.read_parquet(p)
-                return s[s.columns[0]]
-        except Exception:  # noqa: BLE001
-            pass
+            s = pd.read_parquet(p)
+            return s[s.columns[0]]
+        except Exception:  # noqa: BLE001 - missing or unreadable
+            return None
+
+    if p.exists() and (time.time() - p.stat().st_mtime) / 86400.0 <= max_age_days:
+        s = cached()
+        if s is not None:
+            return s, None
     try:
         r = requests.get(FRED_CSV, params={'id': series_id}, headers=UA, timeout=30)
         r.raise_for_status()
         df = pd.read_csv(StringIO(r.text))
+        if df.shape[1] < 2:
+            raise ValueError(f'not a FRED CSV: {r.text[:80]!r}')
         date_col, val_col = df.columns[0], df.columns[1]
         df[date_col] = pd.to_datetime(df[date_col])
         df[val_col] = pd.to_numeric(df[val_col], errors='coerce')
@@ -529,15 +599,11 @@ def _fred_series(series_id: str, max_age_days: int = 3):
             s.to_frame().to_parquet(p)
         except Exception:  # noqa: BLE001
             pass
-        return s
-    except Exception:  # noqa: BLE001
-        if p.exists():
-            try:
-                s = pd.read_parquet(p)
-                return s[s.columns[0]]
-            except Exception:  # noqa: BLE001
-                pass
-        return None
+        return s, None
+    except Exception as exc:  # noqa: BLE001
+        problem = f'{type(exc).__name__}: {str(exc)[:140]}'
+        s = cached() if p.exists() else None
+        return s, problem + ('; using the cached series' if s is not None else '')
 
 
 def get_macro(cfg: ValuationConfig, verbose: bool = True) -> dict:
@@ -554,9 +620,12 @@ def get_macro(cfg: ValuationConfig, verbose: bool = True) -> dict:
     size test silently ran in 1973 dollars and passed every company over $100m
     of revenue.
     """
-    aaa = _fred_series('AAA')
-    dgs10 = _fred_series('DGS10')
-    cpi = _fred_series('CPIAUCSL', max_age_days=20)
+    (aaa, e_aaa), (dgs10, e_10y), (cpi, e_cpi) = (
+        _fred_series('AAA'), _fred_series('DGS10'), _fred_series('CPIAUCSL', max_age_days=20))
+    if verbose:
+        for sid, problem in (('AAA', e_aaa), ('DGS10', e_10y), ('CPIAUCSL', e_cpi)):
+            if problem:
+                print(f'  macro: FRED {sid} not refreshed - {problem}')
 
     out = {
         'aaa_yield': float(aaa.iloc[-1]) if aaa is not None and len(aaa) else None,
@@ -766,6 +835,20 @@ def get_prices(tickers, years: int = 12, force: bool = False,
                         time.sleep(10)
             for t in batch:
                 sub = _extract_close(raw, t)
+                if sub is not None:
+                    got[t] = sub
+            # A ticker can fail inside a batch on its own - yfinance's cache
+            # reporting "database is locked", a timeout - while the rest
+            # arrive; on a first run that was a company with no price. One more
+            # try each, one at a time; a delisted ticker costs one empty request.
+            for t in [t for t in batch if t not in got]:
+                try:
+                    one = yf.download(t, start=since_of([t]).strftime('%Y-%m-%d'),
+                                      auto_adjust=False, actions=False, progress=False,
+                                      group_by='ticker', threads=False, timeout=60)
+                except Exception:  # noqa: BLE001
+                    continue
+                sub = _extract_close(one, t)
                 if sub is not None:
                     got[t] = sub
             time.sleep(0.6)

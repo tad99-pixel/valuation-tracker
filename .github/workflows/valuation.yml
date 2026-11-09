@@ -29,15 +29,15 @@ jobs:
     permissions:
       contents: write          # to push the history store to the data branch
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check out the history store (data branch)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: data
           path: _data
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: pip
@@ -50,7 +50,7 @@ jobs:
       # only what changed. Losing this cache costs one slower run, nothing more:
       # the record itself lives on the data branch.
       - name: Restore downloads
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             data_cache
@@ -69,7 +69,7 @@ jobs:
 
       - name: Keep downloads for the next run
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             data_cache
@@ -96,7 +96,7 @@ jobs:
           cp valuation_dashboard.html _site/index.html
           cp _data/valuation_tracker.xlsx _site/
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: _site
 
@@ -111,4 +111,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

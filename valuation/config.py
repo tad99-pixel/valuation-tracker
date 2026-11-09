@@ -353,6 +353,17 @@ NA_CRITERIA_BY_GROUP = {
 # from the balance sheet.
 BOOK_VALUED_GROUPS = ('bank', 'insurance', 'financial')
 
+# Companies that moved to a new SEC registration - a reorganisation into a new
+# holding company, a change of state - file their history under the old CIK
+# and everything after under the new one, and EDGAR does not link the two.
+# Current CIK -> earlier CIKs; their facts are merged, so a company's ten-year
+# record survives the change instead of restarting with one quarterly report.
+CIK_SUCCESSIONS = {
+    # ExxonMobil Holdings Corp (Texas) took over the XOM listing in 2026; the
+    # history is filed by Exxon Mobil Corp (New Jersey).
+    2115436: (34088,),
+}
+
 
 # ---------------------------------------------------------------------------
 # Provenance - printed in the dashboard so a heuristic is never mistaken for

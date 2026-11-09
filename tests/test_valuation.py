@@ -845,6 +845,32 @@ def test_rule_changes_are_labelled_in_the_change_log():
     print('  changes: a rule change is labelled, not reported as the company moving')
 
 
+def test_a_company_that_changed_registration_keeps_its_history():
+    """ExxonMobil moved its listing to a new Texas holding company in 2026: the
+    new CIK had one quarterly report, the old one the whole history, and the
+    panel failed with "no annual duration facts"."""
+    from valuation import sources as SRC
+    assert SRC.cik_family(34088) == [2115436, 34088] == SRC.cik_family(2115436)
+    assert SRC.cik_family(320193) == [320193]
+    old = facts_doc({'NetIncomeLoss': {'USD': [
+        dur('2023-01-01', '2023-12-31', 36e9, '2024-02-28'),
+        dur('2024-01-01', '2024-12-31', 33e9, '2025-02-26')]}})
+    new = facts_doc({'NetIncomeLoss': {'USD': [
+        dur('2024-01-01', '2024-12-31', 33.5e9, '2027-02-20'),      # restated by the new filer
+        dur('2025-01-01', '2025-12-31', 30e9, '2027-02-20')]}})
+    panel, _ = F.build_panel('XOM', SRC.merge_facts([new, old]), {'sic': '2911'}, CFG,
+                             splits=pd.Series(dtype=float))
+    assert list(panel['net_income']) == [36e9, 33.5e9, 30e9], list(panel['net_income'])
+
+    class Ref:
+        def __init__(self, source, sha1):
+            self.cik, self.source, self.sha1 = 1, source, sha1
+    merged = SRC.MergedFacts([Ref('cache', 'a'), Ref('stale-cache', 'b')])
+    assert merged.source == 'stale-cache' and merged.sha1
+    assert SRC.MergedFacts([Ref('cache', 'a'), Ref('cache', None)]).sha1 is None
+    print('  successions: one history across a change of registration')
+
+
 def test_reverse_dcf_reports_its_discount_rate_range():
     p, info, prices = synthetic_company()
     rev = S.evaluate('X', p, info, prices, MACRO, CFG)['models']['reverse_dcf']
