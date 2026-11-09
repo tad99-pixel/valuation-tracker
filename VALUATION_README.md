@@ -269,17 +269,22 @@ cheaply. Instead:
 | Per-class figures (Visa, Berkshire) | each annual report once, from its XBRL in SEC's archive - which needs a contact (above) |
 
 A cached run of the 49-name watchlist takes about 20 seconds, down from 50.
+On GitHub's runners the first S&P 500 run took 7 minutes, downloading every
+filing; with the filings cached, a run that rebuilt every panel took under 2.
 Funds and trusts are declined on SEC's own entity type before any facts are
 fetched; matching "ETF" or "TRUST" in a name both missed funds and caught
 REITs.
 
 ---
 
-## What the first run said (2026-11-07, config r3)
+## What the runs said
 
-49 companies, all with filings; margin of safety measurable for 33. The median
-measured company trades at **1.46x** its estimated value, and only 3 of the 33
-are below their estimate. No company is a *Candidate*.
+### The watchlist, from 2026-11-07
+
+The first run (config r3): 49 companies, all with filings; margin of safety
+measurable for 33. The median measured company trades at **1.46x** its
+estimated value, and only 3 of the 33 are below their estimate. No company
+is a *Candidate*.
 
 | Verdict | Count |
 |---|---|
@@ -304,6 +309,57 @@ apiece); Johnson & Johnson and Mastercard from *value unclear* to *dear*
 (their DCFs had been inflated by buyback growth until the models were 3x
 apart); and U.S. Bancorp's 3% "margin" disappeared once its $7bn of
 preferred stock stopped counting as common equity.
+
+Under config r6 (2026-11-09) - 15 x earnings moved to the price limits,
+discount rates that follow leverage, and the dividend record: *Good
+business, dear* 28, *No* 15, *value unclear* 4, *insufficient data* 2;
+margin measurable for 36, median 1.78x, and none of the 36 below its
+estimate. What moved, and why:
+
+- Nike (*fair price* to *dear*) and Verizon (*statistically cheap* to *No*)
+  had both been valued at 15 x earnings, which set their medians. Without
+  it, Nike's estimate is $38.49 against a price of $38.59. Verizon's DCF
+  also discounts at 10.9% now, its debt being 0.84x its market value.
+- Merck, 3M and Caterpillar went from *value unclear* to *dear*: the new
+  rates lowered their DCFs and raised their EPVs enough to bring the two
+  within 3x of each other. Deere, Southern and Duke went the other way, each
+  left with one model that can value it, and NextEra with none - its capital
+  spending leaves no owner earnings to discount, and its net debt exceeds
+  its earnings power value.
+- Graham's twenty-year dividend test can now pass, and 40 of the 49 did.
+  Apple, Alphabet, NVIDIA, Cisco and Visa have paid for less than twenty
+  years, Intel paid nothing in 2025 and Berkshire pays nothing; AbbVie, a
+  2013 spin-off, cannot be checked.
+
+Config r7 changed no watchlist verdict; Mastercard's dividend record now
+passes at twenty years, the 41st.
+
+### The S&P 500, 2026-11-09 (config r7)
+
+503 tickers, 501 evaluated: HONA, newly listed, has filed no annual report
+yet, and VYLR is declined on SEC's entity type. The margin of safety is
+measurable for 260. The median measured company trades at **1.84x** its
+estimate; 22 are below it, and 7 below two-thirds of it - Graham's margin.
+
+| Verdict | Count |
+|---|---|
+| Candidate | 6 (Lennar, D.R. Horton, T. Rowe Price, Synchrony, Cognizant, Deckers) |
+| Cheap, quality passes | 3 (CF Industries, HP, PayPal) |
+| Good business, fair price | 4 (General Mills, Arch Capital, Everest, Skyworks) |
+| Statistically cheap only | 5 (MGM Resorts, Comcast, Aptiv, Charter, LyondellBasell) |
+| Good business, dear | 163 |
+| Good business, value unclear | 77 |
+| No | 231 |
+| Insufficient data | 12 (new listings and spin-offs with a few years on file; multi-class filers) |
+
+Read the candidates with *Known limits* in mind. Two are homebuilders,
+valued on earnings from a housing boom - the cyclical case a ten-year record
+flatters most - and each is a statement about these thresholds at these
+prices, not a recommendation.
+
+The margin is withheld for 208 companies: 108 have one model that can value
+them, and for 96 the DCF and the EPV are more than 3x apart. 261 of the 501
+have a verified record of twenty years of dividends or more.
 
 ## How it was checked
 
@@ -392,7 +448,7 @@ question from r5 decided:
   whole company - instead of one flat 9%.
 - **Graham's twenty years of dividends are measured**, from the filings and
   the dividend record in the price history before them. The test could not
-  pass before; on the watchlist, 40 of 49 now do.
+  pass before; on the watchlist, 41 of 49 now do.
 - **The one-dollar test compares like with like.** The rise in market value
   ran ten calendar years back from today, up to a year adrift of the ten
   fiscal years of retained earnings it was set against; it now runs over
