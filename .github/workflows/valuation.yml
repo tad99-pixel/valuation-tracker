@@ -1,0 +1,114 @@
+name: Valuation tracker
+
+# Runs the tracker after the US close on weekdays, keeps its history on the
+# `data` branch, and publishes the dashboard with GitHub Pages.
+on:
+  schedule:
+    - cron: '30 22 * * 1-5'   # 22:30 UTC = 17:30 New York in winter, 18:30 in summer
+  workflow_dispatch:           # "Run workflow" button on the Actions tab
+  push:                        # a code or watchlist change re-runs it
+    branches: [main]
+    paths:
+      - 'valuation/**'
+      - 'run_valuation.py'
+      - 'valuation_watchlist.txt'
+      - 'requirements-valuation.txt'
+      - '.github/workflows/valuation.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: valuation-tracker
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write          # to push the history store to the data branch
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the history store (data branch)
+        uses: actions/checkout@v4
+        with:
+          ref: data
+          path: _data
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-valuation.txt
+
+      - name: Install
+        run: pip install -r requirements-valuation.txt
+
+      # Filings, prices and splits from earlier runs, so a normal day fetches
+      # only what changed. Losing this cache costs one slower run, nothing more:
+      # the record itself lives on the data branch.
+      - name: Restore downloads
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data_cache
+            valuation_state
+          key: valuation-downloads-${{ github.run_id }}
+          restore-keys: valuation-downloads-
+
+      - name: Regression tests
+        run: python tests/test_valuation.py
+
+      - name: Run the tracker
+        env:
+          VALUATION_TRACKER: _data/valuation_tracker.xlsx
+          VALUATION_USER_AGENT: ${{ secrets.VALUATION_USER_AGENT }}
+        run: python run_valuation.py
+
+      - name: Keep downloads for the next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data_cache
+            valuation_state
+          key: valuation-downloads-${{ github.run_id }}
+
+      - name: Commit the history store
+        working-directory: _data
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A valuation_tracker_store
+          if [ -d valuation_pending ]; then git add -A valuation_pending; fi
+          if git diff --cached --quiet; then
+            echo "History store unchanged."
+          else
+            git commit -m "Tracker run $(date -u +%Y-%m-%d)"
+            git push origin HEAD:data
+          fi
+
+      - name: Assemble the site
+        run: |
+          mkdir -p _site
+          cp valuation_dashboard.html _site/index.html
+          cp _data/valuation_tracker.xlsx _site/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: run
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
