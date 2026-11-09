@@ -1,0 +1,4 @@
+# The workbook is regenerated from the store on every run and published with
+# the site; only the store itself is the record.
+*.xlsx
+*.tmp.*
