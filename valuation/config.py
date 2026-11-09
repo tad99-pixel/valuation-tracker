@@ -34,7 +34,7 @@ LOG_PATH = ROOT / 'valuation_daily.log'
 # Stamped on every stored valuation. Bump whenever a threshold or a model
 # changes, so a tracker history is never silently pooled across two different
 # definitions of "margin of safety".
-CONFIG_VERSION = '2026-11-09-r6'
+CONFIG_VERSION = '2026-11-09-r7'
 
 for _d in (CACHE_DIR, FUND_DIR, FACTS_DIR, MACRO_DIR, STATE_DIR, REPORT_DIR):
     _d.mkdir(parents=True, exist_ok=True)
@@ -364,6 +364,9 @@ CIK_SUCCESSIONS = {
     # ExxonMobil Holdings Corp (Texas) took over the XOM listing in 2026; the
     # history is filed by Exxon Mobil Corp (New Jersey).
     2115436: (34088,),
+    # Texas Pacific Land Corp replaced Texas Pacific Land Trust in January
+    # 2021, one share for each sub-share certificate; the trust filed 1996-2020.
+    1811074: (97517,),
 }
 
 # Companies that tag their EPS and share counts only per share class, which

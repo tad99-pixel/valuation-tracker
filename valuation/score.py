@@ -316,6 +316,9 @@ def evaluate(ticker: str, panel: pd.DataFrame, info: dict,
     if info.get('share_unit_fixes'):
         reasons.append('share counts filed at the wrong scale were corrected ('
                        + ', '.join(info['share_unit_fixes']) + ')')
+    if info.get('da_unit_fixes'):
+        reasons.append('depreciation and amortisation filed at the wrong scale was corrected ('
+                       + ', '.join(info['da_unit_fixes']) + ')')
     if info.get('share_events'):
         # Real events, kept in the per-share history - but a ten-year growth
         # rate that spans a merger is not organic growth, and it should say so.

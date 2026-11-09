@@ -448,8 +448,9 @@ def _dei_shares_outstanding(facts: dict):
 SPLIT_RATIOS = (2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 50, 100)
 
 
-def _repair_unit_scale(s: pd.Series) -> tuple:
-    """Undo share counts filed in thousands or millions under a `shares` unit.
+def _repair_unit_scale(s: pd.Series, implied: pd.Series | None = None) -> tuple:
+    """Undo figures filed in thousands or millions too many or too few - share
+    counts under a `shares` unit, and the D&A total.
 
     A real share count does not change a thousandfold in a year, so a value
     that sits ~1,000x or ~1,000,000x away from the median of its neighbours is
@@ -459,14 +460,24 @@ def _repair_unit_scale(s: pd.Series) -> tuple:
     *trillion*, i.e. millions too many).
 
     Only exact orders of magnitude are corrected, within a factor of 3.3, and
-    only when two references agree: the median of the whole history and the
-    median of the surrounding +/-3 years. Either alone misfires. A local
-    window can be outvoted - Berkshire's two bad years, 2008 and 2009, made
-    its correct 2007 figure look a millionfold too small, and an earlier
-    version "repaired" it. A global median can sit far from both ends of a
-    company that grew its share count several-fold. Anything that is not an
-    exact order of magnitude by both measures is left alone: a genuine 2x or
-    9x change is a corporate event, and "repairing" it would be inventing data.
+    only when two references agree. There are three: the median of the whole
+    history, the median of the surrounding +/-3 years, and - when `implied`
+    is given - the same year's figure derived another way, within a factor
+    of 1.5: net income / EPS for a share count, depreciation plus
+    amortisation for a D&A total (Coherent tagged its FY2023 total as
+    $681.7bn, a thousand times its $267.6m + $414.1m of parts). Any
+    one alone misfires. A local window can be outvoted - Berkshire's two bad
+    years, 2008 and 2009, made its correct 2007 figure look a millionfold too
+    small, and an earlier version "repaired" it; and a run of bad years
+    outvotes it for every year but the first - McDonald's filed 2021-25 in
+    millions, and only 2021 was repaired until net income / EPS had a vote.
+    That cannot decide alone either, since net income can be mis-scaled too -
+    unless its whole series runs smoothly where the filed one jumps, which
+    says which of the two is wrong (see below). A
+    global median can sit far from both ends of a company that grew its share
+    count several-fold. Anything that is not an exact order of magnitude by
+    two measures is left alone: a genuine 2x or 9x change is a corporate
+    event, and "repairing" it would be inventing data.
     """
     s = s.copy()
     vals = s.dropna()
@@ -474,21 +485,42 @@ def _repair_unit_scale(s: pd.Series) -> tuple:
     fixed = []
     if len(vals) < 3:
         return s, fixed
-    v = vals.to_numpy(dtype=float)
-    global_ref = float(np.median(v))
+    v = vals.to_numpy(dtype=float).copy()
+    d = pd.DatetimeIndex(vals.index)
+    own = (implied.reindex(vals.index).to_numpy(dtype=float) if implied is not None
+           else np.full(len(v), np.nan))
 
-    def scale_error(r):
+    def scale_error(r, tol=3.3):
         for scale in (1e3, 1e6):
-            if scale / 3.3 <= r <= scale * 3.3:
+            if scale / tol <= r <= scale * tol:
                 return 1.0 / scale, f'/{scale:,.0f}'
-            if 1 / (scale * 3.3) <= r <= 3.3 / scale:
+            if 1 / (scale * tol) <= r <= tol / scale:
                 return scale, f'x{scale:,.0f}'
         return None, None
+
+    def jumps(x):
+        return any(scale_error(r)[0] is not None for r in x[1:] / x[:-1])
+
+    # When the figures derived another way run smoothly across the years and
+    # the filed ones jump a thousandfold, the derived series settles it: the
+    # filed years that disagree with it by an exact order of magnitude are the
+    # wrong ones. A run of bad years can carry both medians - ConocoPhillips
+    # filed 2010-19 in thousands, ten of its nineteen years, and the vote below
+    # left eight of them and "repaired" its correct 2009 instead. Were net
+    # income the mis-scaled figure, the derived series would be the one jumping.
+    has_own = np.isfinite(own) & (own > 0)
+    if has_own.sum() >= 3 and jumps(v) and not jumps(own[has_own]):
+        for i in np.flatnonzero(has_own):
+            f, label = scale_error(v[i] / own[i], tol=1.5)
+            if f is not None:
+                v[i] *= f
+                s[vals.index[i]] = v[i]
+                fixed.append(f'{d[i].year}: {label}')
+    global_ref = float(np.median(v))
 
     # Each value's neighbours: the others within three calendar years, or all
     # the others when fewer than two are that close. One boolean matrix rather
     # than a filtered Series per value.
-    d = pd.DatetimeIndex(vals.index)
     lo = (d - pd.DateOffset(years=3)).to_numpy()
     hi = (d + pd.DateOffset(years=3)).to_numpy()
     at = d.to_numpy()
@@ -497,14 +529,15 @@ def _repair_unit_scale(s: pd.Series) -> tuple:
     for i in range(len(v)):
         mask = near[i] if near[i].sum() >= 2 else others[i]
         local_ref = float(np.median(v[mask]))
-        if local_ref <= 0 or global_ref <= 0:
-            continue
-        f_global, label = scale_error(v[i] / global_ref)
-        f_local, _ = scale_error(v[i] / local_ref)
-        if f_global is not None and f_global == f_local:
-            s[vals.index[i]] = v[i] * f_global
-            fixed.append(f'{d[i].year}: {label}')
-    return s, fixed
+        votes = [scale_error(v[i] / global_ref), scale_error(v[i] / local_ref)]
+        if np.isfinite(own[i]) and own[i] > 0:
+            votes.append(scale_error(v[i] / own[i], tol=1.5))
+        factors = [f for f, _ in votes if f is not None]
+        agreed = next((f for f in factors if factors.count(f) >= 2), None)
+        if agreed is not None:
+            s[vals.index[i]] = v[i] * agreed
+            fixed.append(f'{d[i].year}: ' + next(lab for f, lab in votes if f == agreed))
+    return s, sorted(fixed)
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +675,7 @@ def build_panel(ticker: str, facts: dict, meta: dict,
 
     panel = _derive_columns(panel)
     unit_fixes = list(panel.attrs.get('share_unit_fixes', []))
+    da_fixes = list(panel.attrs.get('da_unit_fixes', []))
     from_identity = int(panel.attrs.get('shares_from_identity', 0))
 
     cover, cover_date, cover_filed = _dei_shares_outstanding(facts)
@@ -662,6 +696,7 @@ def build_panel(ticker: str, facts: dict, meta: dict,
         'cover_shares': cover,
         'cover_filed': cover_filed,
         'share_unit_fixes': unit_fixes,
+        'da_unit_fixes': da_fixes,
         'shares_from_identity': from_identity,
         'n_years': int(len(panel)),
         'first_fy': panel.index[0] if len(panel) else None,
@@ -941,9 +976,12 @@ def _derive_columns(panel: pd.DataFrame) -> pd.DataFrame:
     # usually tags the parts too, and summing all three counts the
     # amortisation twice. Owner earnings add back every non-cash charge
     # Buffett lists, amortisation included.
-    da_total = col('depreciation_amortisation')
     dep, amort = col('depreciation_only'), col('amortisation_intangibles')
     da_parts = (dep + amort.fillna(0)).where(dep.notna(), amort)
+    # The total can be filed at the wrong scale; its parts and its other
+    # years are the references (see `_repair_unit_scale`).
+    da_total, da_fixes = _repair_unit_scale(col('depreciation_amortisation'), da_parts)
+    p.attrs['da_unit_fixes'] = da_fixes
     p['depreciation_amortisation'] = da_total.fillna(da_parts)
     p['da_source'] = np.where(da_total.notna(), 'total',
                               np.where(da_parts.notna(), 'depreciation+amortisation',
@@ -1020,13 +1058,22 @@ def _derive_columns(panel: pd.DataFrame) -> pd.DataFrame:
     # shares, and for Wells Fargo in 2009 - TARP preferred dividends - it was
     # 7.0bn against 4.6bn filed. The identity is now a fallback for years with
     # no filed count at all, and only where it lands near the neighbouring
-    # years.
-    shares_raw = col('shares_diluted').fillna(col('shares_basic')).fillna(
-        col('shares_outstanding'))
-    shares_filed, unit_fixes = _repair_unit_scale(shares_raw)
+    # years. It also has a vote when a filed count's scale is in doubt.
+    #
+    # A count of zero is no count: it marks the years before there were shares
+    # - Constellation Energy's carve-out years before its 2022 spin-off, Ares
+    # before it became a corporation. Kept, it made the next year a jump of
+    # "infx" and cut the per-share history there.
+    def count(name):
+        c = col(name)
+        return c.where(c > 0)
+
+    shares_raw = count('shares_diluted').fillna(count('shares_basic')).fillna(
+        count('shares_outstanding'))
     eps_filed = col('eps_diluted').fillna(col('eps_basic'))
     shares_implied = col('net_income') / eps_filed.replace(0, np.nan)
     shares_implied = shares_implied.where(shares_implied > 0)
+    shares_filed, unit_fixes = _repair_unit_scale(shares_raw, shares_implied)
 
     shares = shares_filed.copy()
     ref = shares_filed.rolling(7, center=True, min_periods=2).median()
@@ -1046,7 +1093,7 @@ def _derive_columns(panel: pd.DataFrame) -> pd.DataFrame:
     # count it divides by. The weighted count stands in where no year-end
     # count is filed, or where the two disagree by more than a quarter (a
     # count filed for one class, or at the wrong scale).
-    outstanding, _ = _repair_unit_scale(col('shares_outstanding'))
+    outstanding, _ = _repair_unit_scale(count('shares_outstanding'), shares_implied)
     agree = (outstanding / shares.replace(0, np.nan)).between(0.8, 1.25)
     year_end = outstanding.where(agree, shares)
     p['shares_year_end'] = year_end
@@ -1058,7 +1105,10 @@ def _derive_columns(panel: pd.DataFrame) -> pd.DataFrame:
 
     # EPS: prefer what the company reported. Computing it from net income and a
     # share count disagrees with the filed figure often enough to matter, and
-    # the filed figure is the one Graham's tests refer to.
+    # the filed figure is the one Graham's tests refer to - except a filed zero
+    # in a year with no shares, which is the same placeholder as the count
+    # (Constellation Energy 2020-21: $589m of income, "EPS 0.00").
+    eps_filed = eps_filed.mask((eps_filed == 0) & shares.isna())
     computed = col('net_income') / shares.replace(0, np.nan)
     p['eps'] = eps_filed.fillna(computed)
     p['eps_source'] = np.where(eps_filed.notna(), 'filed', 'computed')

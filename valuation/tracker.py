@@ -341,7 +341,8 @@ def detect_changes(previous: pd.DataFrame | None, latest: pd.DataFrame,
             if None in (px0, px1, v0, v1):
                 if v0 is not None and v1 is None:
                     add(t, f'{label} lost{tag}', f'{v0:,.2f}', None,
-                        'no longer computable from the latest filings')
+                        'not computable under the new rules' if tag
+                        else 'no longer computable from the latest filings')
                 continue
             if px0 >= v0 and px1 < v1:
                 add(t, f'below {label}{tag}', f'{px0:,.2f} vs {v0:,.2f}',

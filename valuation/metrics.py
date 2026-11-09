@@ -242,10 +242,13 @@ def _with_payment_history(state: pd.Series, payments: pd.Series, want_years: int
     """`state` extended back with a record of dividend payments.
 
     The fiscal calendar is carried back `want_years` + 1 years before the
-    first filed year. A fiscal year the payment record covers is paid if any
-    dividend went ex inside it, and unpaid if none did - unless the filings
-    say it was paid, which stands: an annual payer's ex-date can slip across
-    a year end. Years before the record begins stay unknown.
+    first filed year. A fiscal year is paid if any dividend went ex inside
+    it. It is unpaid only if the record covers the whole year and none did -
+    unless the filings say it was paid, which stands: an annual payer's
+    ex-date can slip across a year end. A year the record covers only in
+    part, with no payment in it, stays unknown; one with a payment in it is
+    paid however little of it is covered - Mastercard listed in May 2006 and
+    paid its first dividend that August.
     """
     since = payments.attrs.get('since')
     ends = list(state.index)
@@ -254,11 +257,9 @@ def _with_payment_history(state: pd.Series, payments: pd.Series, want_years: int
     starts = [full.index[0] - pd.DateOffset(years=1)] + list(full.index[:-1])
     when = pd.DatetimeIndex(payments.index)
     for begin, end in zip(starts, full.index):
-        if begin < since:
-            continue
         if ((when > begin) & (when <= end)).any():
             full[end] = 1.0
-        elif pd.isna(full[end]):
+        elif begin >= since and pd.isna(full[end]):
             full[end] = 0.0
     return full
 
@@ -330,9 +331,15 @@ def dividend_record(panel: pd.DataFrame, want_years: int, payments: pd.Series | 
         'pays_now': bool(len(state) and state.iloc[-1] == 1.0),
     }
     source = (' (filings, and the dividend record before them)' if history else '')
-    if interrupted:
+    if interrupted and streak < want_years:
         out['note'] = (f'no dividend in fiscal {_year_label(stop_at[0])} - current streak '
                        f'{streak}y, so {want_years}y uninterrupted is refuted{source}')
+    elif interrupted:
+        # A gap older than the streak Graham asks for refutes nothing:
+        # Microsoft paid its first dividend in fiscal 2003.
+        out['note'] = (f'{streak}y uninterrupted since fiscal '
+                       f'{_year_label(state.index[window - streak])}, after none in fiscal '
+                       f'{_year_label(stop_at[0])}{source}')
     elif out['verifiable']:
         out['note'] = f'{streak}y uninterrupted{source}'
     elif stop_at is None:

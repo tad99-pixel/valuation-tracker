@@ -176,6 +176,76 @@ def test_unit_scale_repair_needs_both_references():
     print('  unit repair: Berkshire 2008-09 fixed, 2007 untouched, real growth untouched')
 
 
+def test_unit_scale_repair_takes_a_vote_from_the_years_own_figures():
+    """McDonald's filed 2021-25 share counts in millions: each bad year's
+    neighbours were bad too, so only 2021 was repaired and the stock went to
+    INSUFFICIENT DATA. Net income / EPS breaks the tie - but cannot decide
+    alone, since net income can be mis-scaled as well."""
+    idx = years(10, 2016)
+    good = np.array([8.61e8, 8.16e8, 7.86e8, 7.65e8, 7.50e8, 7.52e8, 7.41e8, 7.32e8, 7.22e8, 7.16e8])
+    filed = pd.Series(good.copy(), index=idx)
+    filed.iloc[5:] = good[5:] / 1e6
+    implied = pd.Series(good * 1.001, index=idx)
+    fixed, notes = F._repair_unit_scale(filed)
+    assert len(notes) < 5, 'expected the neighbour test alone to miss part of the run'
+    fixed, notes = F._repair_unit_scale(filed, implied)
+    assert np.allclose(fixed, good) and len(notes) == 5, notes
+    # Net income filed a millionfold too small one year: the count stays.
+    odd = implied.copy()
+    odd.iloc[3] /= 1e6
+    fixed, notes = F._repair_unit_scale(pd.Series(good, index=idx), odd)
+    assert notes == [] and np.allclose(fixed, good), notes
+
+    # ConocoPhillips filed 2010-19 in thousands: ten of nineteen years, enough
+    # to carry both medians. The vote alone left most of the run and divided
+    # the correct 2009 by a thousand; the smooth net income / EPS series fixes
+    # the run and leaves 2009 alone.
+    idx = years(19, 2007)
+    cop = np.array([2.16, 2.00, 1.97, 1.49, 1.39, 1.25, 1.24, 1.25, 1.24, 1.25, 1.22, 1.18,
+                    1.12, 1.08, 1.33, 1.28, 1.21, 1.18, 1.25]) * 1e9
+    filed = pd.Series(cop.copy(), index=idx)
+    filed.iloc[3:13] = cop[3:13] / 1e3
+    fixed, notes = F._repair_unit_scale(filed, pd.Series(cop * 1.002, index=idx))
+    assert np.allclose(fixed, cop) and len(notes) == 10, notes
+    # The mirror image - net income filed in thousands for a run of years, the
+    # share count sound - changes nothing.
+    nin = pd.Series(cop * 1.002, index=idx)
+    nin.iloc[3:13] = nin.iloc[3:13] / 1e3
+    fixed, notes = F._repair_unit_scale(pd.Series(cop.copy(), index=idx), nin)
+    assert notes == [] and np.allclose(fixed, cop), notes
+
+    # Coherent's FY2023 D&A total, a thousandfold its own parts, is repaired;
+    # parts filed in thousands do not overrule a sound total.
+    da = pd.Series([2.2e8, 2.7e8, 2.87e8, 6.817e11, 5.598e8, 5.536e8, 5.219e8], index=years(7, 2020))
+    parts = pd.Series([2.2e8, 2.7e8, 2.87e8, 6.817e8, 5.598e8, 5.536e8, 5.219e8], index=da.index)
+    fixed, notes = F._repair_unit_scale(da, parts)
+    assert abs(fixed.iloc[3] - 6.817e8) < 1 and notes == ['2023: /1,000'], notes
+    sound = da.copy()
+    sound.iloc[3] = 6.817e8
+    small_parts = parts.copy()
+    small_parts.iloc[3] /= 1e3
+    fixed, notes = F._repair_unit_scale(sound, small_parts)
+    assert notes == [] and fixed.equals(sound), notes
+    print('  unit repair: a run of bad years fixed with net income / EPS; D&A against its parts')
+
+
+def test_a_zero_share_count_is_no_count():
+    """Constellation Energy's carve-out years before its 2022 spin-off file
+    zero shares and an EPS of 0.00 against $589m of income. Kept, the zero
+    made 2022 a jump of "infx" and cut the per-share history there."""
+    raw = pd.DataFrame({
+        'net_income': [5.89e8, -2.05e8, -1.6e8, 1.623e9, 3.749e9, 2.319e9],
+        'eps_diluted': [0.0, 0.0, -0.49, 5.01, 11.89, 7.40],
+        'shares_diluted': [0.0, 0.0, 3.29e8, 3.24e8, 3.15e8, 3.14e8],
+    }, index=years(6, 2020))
+    p = F._derive_columns(raw)
+    assert p['shares_used'].iloc[:2].isna().all() and p['eps'].iloc[:2].isna().all(), p
+    assert p['eps'].iloc[2] == -0.49
+    out = F._share_basis_diagnostic(p)
+    assert out['per_share_reliable'], out
+    print('  share counts: a filed zero is read as missing, not as a jump')
+
+
 def test_share_basis_diagnostic_tells_split_from_merger():
     idx = years(6)
     split = pd.DataFrame({'shares_used': [100e6, 101e6, 202e6, 203e6, 204e6, 205e6]}, index=idx)
@@ -843,6 +913,11 @@ def test_rule_changes_are_labelled_in_the_change_log():
     assert list(ch['change']) == ['verdict (rules r4 -> r5)'], list(ch['change'])
     ch = T.detect_changes(prev, now.assign(ConfigVersion='r4'), pd.Timestamp('2026-11-08'))
     assert list(ch['change']) == ['verdict'], list(ch['change'])
+    # A value the new rules cannot compute is not blamed on the filings.
+    had = prev.assign(IntrinsicValue=50.0)
+    ch = T.detect_changes(had, had.assign(IntrinsicValue=None, ConfigVersion='r5'),
+                          pd.Timestamp('2026-11-08'))
+    assert list(ch['detail']) == ['not computable under the new rules'], ch.to_dict('records')
     print('  changes: a rule change is labelled, not reported as the company moving')
 
 
@@ -852,6 +927,7 @@ def test_a_company_that_changed_registration_keeps_its_history():
     panel failed with "no annual duration facts"."""
     from valuation import sources as SRC
     assert SRC.cik_family(34088) == [2115436, 34088] == SRC.cik_family(2115436)
+    assert SRC.cik_family(97517) == [1811074, 97517]       # Texas Pacific Land, trust to corp
     assert SRC.cik_family(320193) == [320193]
     old = facts_doc({'NetIncomeLoss': {'USD': [
         dur('2023-01-01', '2023-12-31', 36e9, '2024-02-28'),
@@ -889,6 +965,19 @@ def test_dividend_record_reaches_back_through_the_payment_history():
     gap.attrs['since'] = pay.attrs['since']
     r = M.dividend_record(p, 20, gap)
     assert r['interrupted'] and 'fiscal 2010' in r['note'], r
+    # A gap before the last twenty years refutes nothing (Microsoft began
+    # paying in fiscal 2003); the note once called it refuted anyway.
+    old = pay[pay.index.year != 2002]
+    old.attrs['since'] = pay.attrs['since']
+    r = M.dividend_record(p, 20, old)
+    assert r['streak'] == 23 and 'refuted' not in r['note'], r
+    assert 'since fiscal 2003' in r['note'], r
+    # The year a company listed counts when it paid in it, though the record
+    # covers only part of it (Mastercard: listed May 2006, paid that August).
+    part = pay[pay.index >= '2006-08-01']
+    part.attrs['since'] = pd.Timestamp('2006-05-25')
+    r = M.dividend_record(p, 20, part)
+    assert r['streak'] == 20 and r['verifiable'] and not r['interrupted'], r
     late = pay[pay.index >= '2012-01-01']
     late.attrs['since'] = pd.Timestamp('2012-01-03')
     r = M.dividend_record(p, 20, late)

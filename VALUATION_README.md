@@ -6,19 +6,26 @@ costs, by the tests Benjamin Graham wrote down in *The Intelligent Investor*
 and the standards Warren Buffett describes in the Berkshire letters.
 
 ```bash
-python run_valuation.py                         # the watchlist file
+python run_valuation.py                         # the watchlist: 49 names, then the rest of the S&P 500
 python run_valuation.py --tickers KO,AAPL,JPM   # just these
-python run_valuation.py --universe sp500        # every constituent (~5 min first run)
+python run_valuation.py --universe sp600        # every S&P 600 constituent instead
 python run_valuation.py --open                  # open the dashboard when done
 python run_valuation.py --force                 # refetch filings and prices, rebuild every panel
 python tests/test_valuation.py                  # regression tests, offline
 ```
 
 Each run appends to the history store in `valuation_tracker_store/`, refreshes
-`valuation_tracker.xlsx` (a view of the last 400 days), and writes
-`valuation_dashboard.html` (one self-contained file; also archived in
-`valuation_reports/`, every day for a month and monthly after that). Edit
-`valuation_watchlist.txt` to change what is tracked.
+`valuation_tracker.xlsx` (a view of recent history), and writes
+`valuation_dashboard.html`. Edit `valuation_watchlist.txt` to change what is
+tracked: a line reading `@sp500` (or `@sp600`) adds every constituent of that
+index, and the dashboard's *List* filter separates the names you chose from
+the ones the index brought in.
+
+Up to 150 companies, the dashboard is one self-contained file, also archived
+in `valuation_reports/` (every day for a month and monthly after that). Above
+that, each company's tests and models go into a small file in
+`valuation_details/`, loaded when its row is opened, so the page stays quick
+with the whole S&P 500 on it. Keep that folder beside the page.
 
 Research tooling, as in the scanner. An intrinsic value is an opinion with
 arithmetic attached; nothing here is a recommendation to buy or sell anything.
@@ -32,7 +39,8 @@ arithmetic attached; nothing here is a recommendation to buy or sell anything.
 | **Graham's seven defensive tests** | *The Intelligent Investor*, ch. 14 | size, financial condition (current ratio and debt vs working capital; for utilities, debt vs equity), 10 years of earnings, 20 years of dividends, 10-year EPS growth, P/E <= 15, P/B <= 1.5 (or P/E x P/B <= 22.5) - seven tests, each counted once |
 | **Graham's 1976 ten-point screen** | his last published screen | five reward tests (earnings yield vs AAA, P/E vs its 5-year high, dividend yield, price vs tangible book, price vs NCAV) and five risk tests |
 | **Buffett quality proxies** | the Berkshire letters, plus labelled third-party proxies | ROE across the cycle, ROIC, debt repayable from earnings, margin level and stability, cash conversion, dilution, the 1984 one-dollar premise |
-| **Intrinsic value** | four earnings-based models | two-stage DCF on owner earnings, earnings power value, 15 x 3-year average EPS, justified P/B for banks and insurers |
+| **Intrinsic value** | earnings-based models | two-stage DCF on owner earnings and earnings power value; for banks and insurers, justified P/B and earnings capitalised at the required return |
+| **Graham's price limits** | his rules, restated as prices | 15 x 3-year average EPS (criterion 6), the Graham Number, net current assets and two-thirds of them - the most he would pay, shown beside the estimate |
 | **What the price assumes** | reverse DCF | the growth today's price needs, beside the growth the record supports |
 
 Every test reports **Pass, Fail or N/A**, and every threshold carries its
@@ -42,7 +50,9 @@ provenance - *quoted from Graham*, *quoted from a Berkshire letter*,
 Warren Buffett, and the dashboard says so.
 
 Graham's 1973 dollar thresholds are inflated by CPI at runtime (x7.6 today), and
-his bond-relative tests use the live AAA corporate yield from FRED.
+his bond-relative tests use the live AAA corporate yield from FRED. His twenty
+years of dividends are read from the filings and, before XBRL begins, from
+the dividend record in the price history.
 
 ---
 
@@ -52,11 +62,23 @@ his bond-relative tests use the live AAA corporate yield from FRED.
 into a valuation; the reverse DCF converts today's price into the assumption it
 embeds, which can be checked against what the business has actually done. It
 needs no growth forecast - but it is not free of inputs. Coca-Cola's price
-implies 20% growth a year at an 8% discount rate and 29% at 10%, so the rate
-one point either side is reported with it. Coca-Cola's conclusion holds
-across that range - its revenue has grown 1.5% a year and its owner earnings
-7% - so it is a finding. Exxon's does not: its price implies 2% growth at 9%,
-below the 4.8% its record supports, but 5.6% at 10%.
+implies 25% growth a year for ten years at its 9.3% discount rate, 21% at
+8.3% and 30% at 10.3%, so the rate one point either side is reported with
+it. Coca-Cola's conclusion holds across that range - its revenue has grown
+1.5% a year and its owner earnings 7% - so it is a finding. Exxon's does not:
+its price implies 2.3% growth at 9.1%, below the 4.8% its record supports,
+but 5.7% at 10.1%.
+
+**The discount rate follows the debt.** Everything starts from one required
+return on the business, 9% before debt. Owner earnings are struck after
+interest, so the DCF discounts them at the return the equity needs, which
+rises with leverage; operating income is struck before interest, so the
+earnings power value capitalises it at the return the whole company needs,
+which tax-deductible debt lowers (Modigliani-Miller, at market values).
+Verizon, with debt at 0.84x its market value, is discounted at 10.9% and
+capitalised at 8.1%; Apple, with almost none, at 9.0% for both. A flat 9%
+treated a heavily indebted company's shares as no riskier than its business.
+Banks and insurers borrow as their business, so their rate is not adjusted.
 
 **N/A is not Fail.** A test is N/A when its data does not exist, or when it does
 not apply - a current ratio for a bank is a category error. Collapsing the two
@@ -69,10 +91,14 @@ the lowest ((highest - lowest) / (highest + lowest) > 0.5), or only one model
 applies, the margin of safety is **withheld**, and it scores zero - the same
 as a measured premium. A margin you cannot demonstrate is not one you have.
 
-**The Graham Number and NCAV are price limits, not values.** They are the
-prices at which Graham's rules would be satisfied. On an asset-light business
-at 40x book the Graham Number does not say what the company is worth; it says
-Graham would never have bought it. They are shown, never averaged in.
+**Graham's price limits are not values.** 15 x three-year earnings, the
+Graham Number and NCAV are the prices at which his rules would be satisfied.
+On an asset-light business at 40x book the Graham Number does not say what
+the company is worth; it says Graham would never have bought it. 15 x
+earnings is criterion 6 restated as a price, and it credits no growth at
+all: while it counted as a value (until config r6), two of the three models
+assumed the business would never grow, and it set the estimate for most
+companies. They are shown, never averaged in.
 
 **The composite only sorts the list.** Neither author weighted tests into one
 number. The verdict is deliberately coarse:
@@ -81,7 +107,7 @@ number. The verdict is deliberately coarse:
 |---|---|
 | Candidate | quality passes, Graham's defensive tests mostly pass, measured margin >= 15% |
 | Cheap, quality passes | as above without the Graham side |
-| Good business, fair price | quality passes, priced within 15% of value - Buffett's "wonderful company at a fair price" |
+| Good business, fair price | quality passes, priced at or up to 15% below the estimate - Buffett's "wonderful company at a fair price" |
 | Good business, dear | quality passes, priced above the estimate |
 | Good business, value unclear | quality passes, the models disagree too much to call a price |
 | Statistically cheap only | measured margin, quality fails - Graham's territory, and the value-trap risk |
@@ -97,14 +123,25 @@ number. The verdict is deliberately coarse:
 on demand from the Actions tab ("Run workflow"). Each run:
 
 1. runs the regression tests, and stops if any fail;
-2. restores the previous run's downloads (filings, prices, splits) from the
-   Actions cache, so a normal day fetches only what changed;
+2. restores the previous run's downloads (filings, prices, splits and
+   dividends) from the Actions cache, so a normal day fetches only what
+   changed;
 3. runs the tracker against the history store checked out from the `data`
    branch, and commits the new run back to it;
-4. publishes the dashboard as the Pages site, with the workbook beside it.
+4. posts what moved - a verdict, a margin band, a price crossing its
+   estimate or one of Graham's limits - as a comment on an issue labelled
+   `tracker-alerts`, which GitHub notifies whoever watches the repository of
+   (its owner, by default). Companies seen for the first time, and changes
+   that a new `CONFIG_VERSION` caused, are left out;
+5. publishes the dashboard as the Pages site, with the workbook beside it.
 
 The `data` branch is the record. The cache is only a speed-up: if GitHub
 evicts it, the next run downloads everything again and nothing is lost.
+
+The dashboard's *What changed* card lists the last 30 days of changes, rule
+changes included and marked as such. If the figures on the page are four or
+more days old - the schedule stopped, or runs are failing - a banner at the
+top says so.
 
 **FRED needs an API key on GitHub.** Its keyless CSV download answers a home
 connection but leaves requests from GitHub's servers hanging, so without a
@@ -118,11 +155,14 @@ gh secret set FRED_API_KEY --repo tad99-pixel/valuation-tracker
 ```
 
 SEC's ticker list (www.sec.gov) refuses GitHub's servers too; the run uses
-the S&P 500 and 600 index tables instead, which cover any constituent. For a
-ticker outside them, or if SEC's data endpoints start refusing requests
-(403s in the run log), add a secret named `VALUATION_USER_AGENT` with a
-contact, for example `ValuationTracker/1.0 you@example.com`; SEC asks
-automated clients to identify themselves.
+the S&P 500 and 600 index tables instead, which cover any constituent. SEC's
+archive of filed documents refuses any request without a contact, from
+anywhere. Visa's and Berkshire's per-class figures are read from it (see
+*Known limits*), so until a secret named `VALUATION_USER_AGENT` holds a
+contact - for example `ValuationTracker/1.0 you@example.com`; SEC asks
+automated clients to identify themselves - those two stay *Insufficient
+data*. The same secret covers a ticker outside both indexes, or 403s from
+SEC's data endpoints in the run log.
 
 GitHub disables scheduled workflows in a public repository after 60 days with
 no activity; if that happens, the Actions tab offers a button to re-enable it.
@@ -134,8 +174,8 @@ no activity; if that happens, the Actions tab offers a button to re-enable it.
 Fundamentals come from the SEC's XBRL `companyfacts` API rather than a vendor
 feed, because Graham's tests need ten years of earnings and twenty of dividends
 and the free alternatives serve four. Raw XBRL produces confidently wrong
-numbers in at least ten distinct ways, each found on a real company and each
-now pinned by a test:
+numbers in at least a dozen distinct ways, each found on a real company and
+each now pinned by a test:
 
 | Trap | Seen on | Handling |
 |---|---|---|
@@ -143,7 +183,11 @@ now pinned by a test:
 | `form=10-K, fp=FY` rows that are quarters | Apple: 90-370-day periods under the same labels | select annual periods by measured length |
 | `fy` is the filing's year, not the period's | every company | key on the period end date |
 | Per-share history on several share bases at once | Apple pre-2014, post-7:1, post-4:1 | divide each fact by the splits after **its filing date** |
-| Share counts filed in thousands or millions | NVIDIA FY08-09, Hershey 2009, Berkshire 08-09 | repair exact orders of magnitude when the global and local medians agree |
+| Share counts filed in thousands or millions | NVIDIA FY08-09, Hershey 2009, Berkshire 08-09, McDonald's 2021-25, ConocoPhillips 2010-19, Garmin 2011-16 | repair exact orders of magnitude when two of three references agree: the whole history, the neighbouring years, and the year's own net income / EPS. Where the net income / EPS series runs smoothly and the filed one jumps a thousandfold, it decides alone: a long run of bad years carries both medians (ConocoPhillips: ten of nineteen years) |
+| A share count of zero | Constellation Energy before its 2022 spin-off; Ares before it became a corporation | read as no count; kept, it was a jump of "infx" that cut the per-share history |
+| A total filed a thousandfold too large | Coherent FY2023 D&A: $681.7bn, against $267.6m + $414.1m of parts | the same vote, with depreciation + amortisation as the year's own figure |
+| Preferred stock filed at par | American Express: $1.6bn of preferred as 1,600 shares of $1m, and a value of zero | shares x liquidation price |
+| A new registrant for an old company | ExxonMobil's 2026 Texas holding company, with one quarterly report; Texas Pacific Land, a trust until 2021 | the predecessor's filings merged in, for the companies `CIK_SUCCESSIONS` names - EDGAR does not link the two |
 | Issued shares mistaken for outstanding | Exxon: 8.0bn issued vs 4.7bn outstanding | outstanding only |
 | A stale, pre-split cover-page share count | Mastercard: 122.5m vs 906m - a 7.4x overvaluation | cover count vetted for age and agreement |
 | Debt filed as overlapping slices | Prologis, Realty Income, Coca-Cola | compose by rule; unknown debt stays unknown |
@@ -183,8 +227,10 @@ version did, and it overstated Apple's DCF by a fifth.
 The record is the store, `valuation_tracker_store/`: `history`, `runlog` and
 `changes` are append-only parquet files, and `latest` is replaced each run. A
 run appends a few kilobytes and rewrites nothing already there. The workbook
-is a view regenerated from the store, with `History` and `Changes` cut to the
-last 400 days, so its cost no longer grows with every day the tracker runs.
+is a view regenerated from the store, with `History` and `Changes` cut to
+recent runs - 400 days for the 49-name watchlist, 100 for the S&P 500, to
+stay under 50,000 history rows - so its cost no longer grows with every day
+the tracker runs.
 
 | Sheet | Contents |
 |---|---|
@@ -218,7 +264,9 @@ cheaply. Instead:
 | `companyfacts` document | only when the index lists a report newer than the cached copy, or after 90 days |
 | Built panel | reused when the document, the split history, the filer's metadata, the config and the source of `fundamentals.py` / `config.py` are all unchanged |
 | Prices | the last few sessions, appended to the cache; if the overlap disagrees (a split restated the history) the ticker is downloaded in full |
-| Split histories | weekly, forty tickers per request, with a direct retry for any ticker missing from its batch |
+| Split and dividend histories | weekly, forty tickers per request, with a direct retry for any ticker missing from its batch; dividends back to 1995 |
+| Index constituents (`@sp500`) | weekly, from the index tables on Wikipedia |
+| Per-class figures (Visa, Berkshire) | each annual report once, from its XBRL in SEC's archive - which needs a contact (above) |
 
 A cached run of the 49-name watchlist takes about 20 seconds, down from 50.
 Funds and trusts are declined on SEC's own entity type before any facts are
@@ -333,31 +381,89 @@ matched the simulation:
 - **A rule change would have been logged as company news.** Changes across a
   `CONFIG_VERSION` are now labelled with the rule change.
 
+The review's suggested improvements followed (config r6), with the open
+question from r5 decided:
+
+- **15 x earnings is a price limit**, beside the Graham Number (see *Reading
+  the output honestly*). Banks and insurers, which would have been left with
+  one model, gained an earnings value: three-year average EPS divided by the
+  required return, crediting no growth.
+- **Discount rates follow leverage** - higher for the equity, lower for the
+  whole company - instead of one flat 9%.
+- **Graham's twenty years of dividends are measured**, from the filings and
+  the dividend record in the price history before them. The test could not
+  pass before; on the watchlist, 40 of 49 now do.
+- **The one-dollar test compares like with like.** The rise in market value
+  ran ten calendar years back from today, up to a year adrift of the ten
+  fiscal years of retained earnings it was set against; it now runs over
+  the same fiscal years, at year-end prices and year-end share counts.
+- **Book value per share uses the year-end share count**, not the year's
+  weighted average, which lags a buyback programme and overstates the count.
+- **Preferred stock filed as shares and a liquidation price** - American
+  Express files $1.6bn of it at a par value of zero - is now deducted.
+- **Visa's and Berkshire's per-class figures** can be read from each annual
+  report's XBRL, when SEC's archive allows it.
+- **The whole S&P 500** is tracked, with each company's details loaded on
+  demand; the page lists what changed, GitHub posts it as a notification,
+  and a banner says when the figures are old.
+
+Config r7 followed the same day, after the first S&P 500 run surfaced data
+errors no watchlist company had, and a gap in the dividend test:
+
+- **Share counts mis-scaled across a run of years.** McDonald's filed its
+  2021-25 counts in millions; W. R. Berkley (2017-21), Garmin (2011-16) and
+  ConocoPhillips (2010-19) filed theirs in thousands. The repair compared
+  each year with its neighbours, which were wrong too, so it fixed the edges
+  of each run at most - and for ConocoPhillips, whose bad years were the
+  majority, "repaired" the one correct year beside them. McDonald's and
+  W. R. Berkley went to *Insufficient data*. Net income / EPS now has a vote,
+  and the deciding one where its own series is smooth (see the table above).
+- **A share count of zero** - filed for the years before a spin-off, an IPO
+  or a conversion to a corporation - was read as a count, and cut the
+  per-share history of Constellation Energy, Ares and Diamondback.
+- **Texas Pacific Land** restarted its history in 2021, when the trust
+  became a corporation under a new registration; the trust's filings are
+  now merged in, as ExxonMobil's are.
+- **A D&A total filed a thousandfold too large** gave Coherent $136bn a year
+  of owner earnings and a DCF of $15,434 a share, against a price of $193.
+  The dispersion guard withheld the margin, but the estimate was still on the
+  page.
+- **The dividend record skipped the year a company listed**, even when it
+  paid in it: Mastercard listed in May 2006 and paid that August, and was
+  reported as unverifiable at 19 years instead of passing at 20.
+- Two notes said the opposite of their verdict: Microsoft's dividend test
+  passed (24 years) with a note calling it refuted, and a value lost to a
+  rule change was blamed on "the latest filings".
+
 ## Known limits
 
-- **The earnings-multiple model is Graham's criterion-6 price ceiling.** "15 x
-  three-year EPS" is the highest price criterion 6 allows, and one of the two
-  factors inside the Graham Number, which is excluded from the estimate for
-  being a price limit. It is kept as a value model, and it sets the median for
-  most companies, so the estimate leans towards no growth: two of the three
-  models credit none. Simply treating it as a price limit would leave margins
-  measurable for 25 companies instead of 35 and move the median to 2.3x, and
-  banks and insurers would be left with one model each unless something (an
-  EPS / 9% earnings value, say) took its place. That is a choice about what
-  "value" means here, and it has not been made.
-
-- **Twenty years of dividends** cannot be verified from XBRL (it starts around
-  2009). An unbroken record is reported as unverifiable, not failed; an
-  interruption inside the record is a failure.
-- **Multi-class filers** - Visa, Berkshire - tag their share counts only with
-  class dimensions this source does not carry, so they get quality tests but
-  no per-share valuation. The tracker says so rather than guessing.
+- **Two value models, not three.** With 15 x earnings moved to the price
+  limits, an operating company's estimate is the median of a DCF and an EPV,
+  and the margin is withheld when they are more than 3x apart - which, for
+  the S&P 500, is often (see above). That is the honest result: the models
+  disagree, and averaging in a third that assumes no growth would only hide
+  it. Banks and insurers have justified P/B and an earnings value instead.
+- **Twenty years of dividends** come from the filings and, before them, the
+  dividend record in Yahoo's price history, which begins at listing. A year
+  the record covers only in part counts as paid if a dividend went ex in it,
+  and as unknown otherwise, so a company listed less than twenty years ago
+  that has paid ever since is reported as unverifiable, not failed. A year
+  with no dividend inside the record is a failure.
+- **Multi-class filers** - Visa, Berkshire, Constellation Brands - tag their
+  share counts and EPS only with class dimensions that `companyfacts` does
+  not carry. For Visa and Berkshire, `valuation/classes.py` reads the
+  per-class figures from each annual report's own XBRL instead; that needs
+  SEC's archive, and so a contact (see *Running on GitHub*). Without one,
+  they get quality tests but no per-share valuation, and the tracker says so
+  rather than guessing.
 - **REITs** are valued on an FFO proxy (net income + D&A), which overstates
   owner earnings for REITs with heavy recurring capex.
 - **Maintenance capex** is not disclosed by anyone. Buffett called his own
   figure a guess; the Greenwald estimate and a D&A alternative are both kept.
-- **The discount rate (9%) is a required return, not a measurement.** The
-  reverse DCF exists so that no conclusion depends on it alone.
+- **The discount rate (9% before debt) is a required return, not a
+  measurement**, and the leverage adjustment rests on book interest rates
+  and today's market values. The reverse DCF exists so that no conclusion
+  depends on it alone.
 - **Cyclicals** defeat any ten-year growth rate. Growth is smoothed with
   three-year medians and capped at revenue growth and 15%, but a business at a
   cyclical peak will still look better than it is.
