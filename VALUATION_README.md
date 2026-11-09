@@ -106,10 +106,23 @@ on demand from the Actions tab ("Run workflow"). Each run:
 The `data` branch is the record. The cache is only a speed-up: if GitHub
 evicts it, the next run downloads everything again and nothing is lost.
 
-If SEC starts refusing requests (403 errors in the run log), add a repository
-secret named `VALUATION_USER_AGENT` with a contact, for example
-`ValuationTracker/1.0 you@example.com`; SEC asks automated clients to
-identify themselves. Nothing else needs a secret.
+**FRED needs an API key on GitHub.** Its keyless CSV download answers a home
+connection but leaves requests from GitHub's servers hanging, so without a
+key the run falls back to the last FRED data it has (a copy kept on the
+`data` branch, dated on the dashboard). Get a free key at
+https://fredaccount.stlouisfed.org/apikeys and add it as a repository secret
+named `FRED_API_KEY`:
+
+```bash
+gh secret set FRED_API_KEY --repo tad99-pixel/valuation-tracker
+```
+
+SEC's ticker list (www.sec.gov) refuses GitHub's servers too; the run uses
+the S&P 500 and 600 index tables instead, which cover any constituent. For a
+ticker outside them, or if SEC's data endpoints start refusing requests
+(403s in the run log), add a secret named `VALUATION_USER_AGENT` with a
+contact, for example `ValuationTracker/1.0 you@example.com`; SEC asks
+automated clients to identify themselves.
 
 GitHub disables scheduled workflows in a public repository after 60 days with
 no activity; if that happens, the Actions tab offers a button to re-enable it.

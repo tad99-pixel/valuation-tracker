@@ -33,6 +33,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import time
 import warnings
 from datetime import datetime, timedelta, timezone
@@ -585,25 +586,52 @@ def _fred_series(series_id: str, max_age_days: int = 3) -> tuple:
         if s is not None:
             return s, None
     try:
-        r = requests.get(FRED_CSV, params={'id': series_id}, headers=UA, timeout=30)
-        r.raise_for_status()
-        df = pd.read_csv(StringIO(r.text))
-        if df.shape[1] < 2:
-            raise ValueError(f'not a FRED CSV: {r.text[:80]!r}')
-        date_col, val_col = df.columns[0], df.columns[1]
-        df[date_col] = pd.to_datetime(df[date_col])
-        df[val_col] = pd.to_numeric(df[val_col], errors='coerce')
-        s = df.dropna().set_index(date_col)[val_col]
-        s.name = series_id
+        s = _fred_download(series_id)
         try:
             s.to_frame().to_parquet(p)
         except Exception:  # noqa: BLE001
             pass
         return s, None
     except Exception as exc:  # noqa: BLE001
-        problem = f'{type(exc).__name__}: {str(exc)[:140]}'
+        # Never the URL: with an API key it carries the key, and a public
+        # repository's run logs are public.
+        problem = f'{type(exc).__name__}: ' + re.sub(r'api_key=[^&\s]+', 'api_key=***', str(exc))[:140]
         s = cached() if p.exists() else None
         return s, problem + ('; using the cached series' if s is not None else '')
+
+
+FRED_API = 'https://api.stlouisfed.org/fred/series/observations'
+
+
+def _fred_download(series_id: str) -> pd.Series:
+    """A FRED series from the API when FRED_API_KEY is set, else the CSV.
+
+    The CSV endpoint needs no key and answers a home connection at once, but
+    leaves requests from cloud servers (GitHub's runners) hanging until they
+    time out. The API is FRED's supported route for automated use and needs
+    a free key; set it as the FRED_API_KEY secret.
+    """
+    key = os.environ.get('FRED_API_KEY')
+    if key:
+        r = requests.get(FRED_API, headers=UA, timeout=(10, 30), params={
+            'series_id': series_id, 'api_key': key, 'file_type': 'json'})
+        r.raise_for_status()
+        obs = r.json().get('observations') or []
+        s = pd.Series([pd.to_numeric(o.get('value'), errors='coerce') for o in obs],
+                      index=pd.DatetimeIndex([o.get('date') for o in obs]), dtype=float)
+    else:
+        r = requests.get(FRED_CSV, params={'id': series_id}, headers=UA, timeout=(10, 30))
+        r.raise_for_status()
+        df = pd.read_csv(StringIO(r.text))
+        if df.shape[1] < 2:
+            raise ValueError(f'not a FRED CSV: {r.text[:80]!r}')
+        s = pd.Series(pd.to_numeric(df.iloc[:, 1], errors='coerce').to_numpy(),
+                      index=pd.DatetimeIndex(pd.to_datetime(df.iloc[:, 0])), dtype=float)
+    s = s.dropna()
+    if s.empty:
+        raise ValueError('FRED returned no observations')
+    s.name, s.index.name = series_id, 'date'
+    return s
 
 
 def get_macro(cfg: ValuationConfig, verbose: bool = True) -> dict:
@@ -627,23 +655,26 @@ def get_macro(cfg: ValuationConfig, verbose: bool = True) -> dict:
             if problem:
                 print(f'  macro: FRED {sid} not refreshed - {problem}')
 
-    out = {
-        'aaa_yield': float(aaa.iloc[-1]) if aaa is not None and len(aaa) else None,
-        'treasury_10y': float(dgs10.iloc[-1]) if dgs10 is not None and len(dgs10) else None,
-        'cpi_ratio': None,
-        'cpi_base_year': cfg.graham.base_year,
-    }
+    def last(s):
+        return (float(s.iloc[-1]), s.index[-1]) if s is not None and len(s) else (None, None)
+
+    # Each value carries its date, which the dashboard prints: a series that
+    # could not be refreshed is used as last fetched, and says how old it is.
+    (aaa_v, aaa_d), (t10_v, t10_d) = last(aaa), last(dgs10)
+    out = {'aaa_yield': aaa_v, 'aaa_as_of': aaa_d, 'treasury_10y': t10_v,
+           'cpi_ratio': None, 'cpi_as_of': None, 'cpi_base_year': cfg.graham.base_year}
     if cpi is not None and len(cpi):
         base = cpi[cpi.index.year == cfg.graham.base_year]
         if len(base):
             out['cpi_ratio'] = float(cpi.iloc[-1] / base.mean())
+            out['cpi_as_of'] = cpi.index[-1]
 
     if verbose:
-        aaa_txt = f'{out["aaa_yield"]:.2f}%' if out['aaa_yield'] is not None else 'unavailable'
-        cpi_txt = (f'CPI x{out["cpi_ratio"]:.1f} since {cfg.graham.base_year}'
-                   if out['cpi_ratio'] is not None else 'CPI unavailable')
-        print(f'  macro: AAA {aaa_txt}, 10y '
-              f'{out["treasury_10y"] if out["treasury_10y"] else "n/a"}, {cpi_txt}')
+        aaa_txt = (f'{aaa_v:.2f}% ({aaa_d:%Y-%m-%d})' if aaa_v is not None else 'unavailable')
+        cpi_txt = (f'CPI x{out["cpi_ratio"]:.1f} since {cfg.graham.base_year} '
+                   f'({out["cpi_as_of"]:%Y-%m})' if out['cpi_ratio'] is not None
+                   else 'CPI unavailable')
+        print(f'  macro: AAA {aaa_txt}, 10y {t10_v if t10_v is not None else "n/a"}, {cpi_txt}')
     return out
 
 

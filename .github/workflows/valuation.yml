@@ -58,6 +58,19 @@ jobs:
           key: valuation-downloads-${{ github.run_id }}
           restore-keys: valuation-downloads-
 
+      # FRED leaves requests from GitHub's servers hanging unless they use its
+      # API (set the FRED_API_KEY secret). Until then, a copy kept on the data
+      # branch stands in - marked old, so FRED is still tried first, and dated
+      # on the dashboard, so its age shows.
+      - name: Seed macro series the cache does not have
+        run: |
+          mkdir -p data_cache/macro
+          for f in _data/macro_seed/*.parquet; do
+            [ -e "$f" ] || continue
+            dest="data_cache/macro/$(basename "$f")"
+            if [ ! -e "$dest" ]; then cp "$f" "$dest" && touch -d '2000-01-01' "$dest"; fi
+          done
+
       - name: Regression tests
         run: python tests/test_valuation.py
 
@@ -65,6 +78,7 @@ jobs:
         env:
           VALUATION_TRACKER: _data/valuation_tracker.xlsx
           VALUATION_USER_AGENT: ${{ secrets.VALUATION_USER_AGENT }}
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: python run_valuation.py
 
       - name: Keep downloads for the next run

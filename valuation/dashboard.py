@@ -189,9 +189,9 @@ def build_payload(results: dict, panels: dict, macro: dict,
         'generated': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC'),
         'config_version': CONFIG_VERSION,
         'macro': {
-            'aaa': macro.get('aaa_yield'),
+            'aaa': macro.get('aaa_yield'), 'aaa_asof': macro.get('aaa_as_of'),
             'treasury_10y': macro.get('treasury_10y'),
-            'cpi_ratio': macro.get('cpi_ratio'),
+            'cpi_ratio': macro.get('cpi_ratio'), 'cpi_asof': macro.get('cpi_as_of'),
             'cpi_base_year': macro.get('cpi_base_year', cfg.graham.base_year),
         },
         'params': {
@@ -731,9 +731,13 @@ _JS = r"""
   function renderAsOf() {
     var m = DATA.macro || {}, p = DATA.params || {};
     var parts = ['Generated ' + DATA.generated];
-    if (isNum(m.aaa)) parts.push('AAA corporate yield ' + m.aaa.toFixed(2) + '%');
+    // Dated, so a series that could not be refreshed shows its age; missing,
+    // so it says which tests went unmeasured rather than vanishing quietly.
+    parts.push(isNum(m.aaa) ? 'AAA corporate yield ' + m.aaa.toFixed(2) + '%' + (m.aaa_asof ? ' (' + m.aaa_asof + ')' : '')
+      : 'AAA yield unavailable, so Graham’s yield tests are not measured');
     if (isNum(m.treasury_10y)) parts.push('10-year Treasury ' + m.treasury_10y.toFixed(2) + '%');
-    if (isNum(m.cpi_ratio)) parts.push('CPI ×' + m.cpi_ratio.toFixed(1) + ' since ' + m.cpi_base_year);
+    parts.push(isNum(m.cpi_ratio) ? 'CPI ×' + m.cpi_ratio.toFixed(1) + ' since ' + m.cpi_base_year + (m.cpi_asof ? ' (' + String(m.cpi_asof).slice(0, 7) + ')' : '')
+      : 'CPI unavailable, so Graham’s size test is not measured');
     if (isNum(p.discount_rate)) parts.push('discount rate ' + (p.discount_rate * 100).toFixed(0) + '%');
     parts.push('config ' + DATA.config_version);
     $('#asof').textContent = parts.join(' · ');
