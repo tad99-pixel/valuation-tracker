@@ -1,0 +1,75 @@
+# Valuation watchlist - one ticker per line, '#' starts a comment.
+#
+# A starting set chosen to exercise every path through the engine - operating
+# companies, banks, insurers, REITs and utilities each take different tests -
+# not a recommendation. Edit freely. For a whole index instead:
+#     python run_valuation.py --universe sp500
+
+# --- consumer staples / durable franchises
+KO
+PEP
+PG
+CL
+KMB
+HSY
+MO
+KR
+WMT
+COST
+
+# --- technology
+AAPL
+MSFT
+GOOGL
+NVDA
+INTC
+CSCO
+TXN
+
+# --- industrials / materials / energy
+MMM
+CAT
+DE
+NUE
+XOM
+CVX
+
+# --- health care
+JNJ
+PFE
+MRK
+ABBV
+
+# --- consumer discretionary / communications
+HD
+NKE
+TGT
+VZ
+
+# --- banks (current-ratio and NCAV tests do not apply)
+JPM
+BAC
+WFC
+USB
+
+# --- insurers
+BRK-B
+CB
+TRV
+ALL
+
+# --- payments / ratings
+AXP
+V
+MA
+MCO
+
+# --- REITs (valued on FFO, not GAAP EPS)
+O
+PLD
+SPG
+
+# --- utilities (Graham's asset-size and debt/equity variants apply)
+SO
+DUK
+NEE

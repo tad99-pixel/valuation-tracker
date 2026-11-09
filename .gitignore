@@ -1,0 +1,19 @@
+# This folder holds more than the valuation tracker - the scanner, notebooks,
+# a trading journal, logs and caches. Only what is listed below is published;
+# everything else is ignored by default, so a new file stays private unless
+# it is added here on purpose.
+/*
+!/.gitignore
+!/.github/
+!/README.md
+!/VALUATION_README.md
+!/requirements-valuation.txt
+!/run_valuation.py
+!/valuation_watchlist.txt
+!/valuation/
+!/tests/
+/tests/*
+!/tests/test_valuation.py
+
+__pycache__/
+*.pyc

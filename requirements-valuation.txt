@@ -1,0 +1,10 @@
+# The valuation tracker's dependencies, pinned to the versions it was tested
+# with. If Yahoo changes something and prices stop downloading, raise the
+# yfinance pin first.
+pandas==2.2.3
+numpy==2.2.5
+pyarrow==25.0.1
+requests==2.32.3
+openpyxl==3.1.5
+lxml==5.4.0        # pandas.read_html, for the fallback ticker map
+yfinance==0.2.61
