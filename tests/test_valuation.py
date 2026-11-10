@@ -851,7 +851,8 @@ def test_partial_cik_map_never_replaces_a_complete_one():
         SRC._index_table_ciks = lambda verbose: {'NEWCO': 99999, 'T1': 5}
         try:
             m = SRC.load_cik_map(verbose=False)
-            assert m['T5999'] == 5999 and m['NEWCO'] == 99999 and m['T1'] == 1
+            # T1: an index constituent, whose table's CIK wins (config r9).
+            assert m['T5999'] == 5999 and m['NEWCO'] == 99999 and m['T1'] == 5
             kept = json.loads(SRC.CIK_MAP_PATH.read_text())
             assert kept['complete'] and len(kept['map']) == 6000, 'partial map overwrote it'
         finally:
@@ -1339,6 +1340,171 @@ def test_archive_keeps_a_month_daily_then_one_a_month():
                 | {f'{dd:%Y%m%d}' for dd in firsts.values()})
         assert left == want, sorted(left ^ want)
     print(f'  archive: {len(left)} of 120 daily copies kept')
+
+
+# ---------------------------------------------------------------------------
+# Found by the point-in-time backtest (2026-11-10, config r9)
+# ---------------------------------------------------------------------------
+
+def _weighted_count_filer(counts: dict, eps: dict, event: str, restated_by: float):
+    """Annual reports for FY2017-24, each filed the next 20 February with three
+    years of weighted diluted share counts, EPS and net income. A report filed
+    on or after `event` states every year on the basis after it - its counts
+    times `restated_by`: the ratio for a split, which ASC 260 restates in every
+    year shown, and 1.0 for a spin-off, which moves no share count."""
+    shares, per_share, income = [], [], []
+    for fy in range(2017, 2025):
+        filed = f'{fy + 1}-02-20'
+        k = restated_by if filed >= event else 1.0
+        for y in (fy - 2, fy - 1, fy):
+            s, e = f'{y}-01-01', f'{y}-12-31'
+            shares.append(dur(s, e, counts[y] * k, filed))
+            per_share.append(dur(s, e, round(eps[y] / k, 6), filed))
+            income.append(dur(s, e, eps[y] * counts[y], filed))
+    return facts_doc({'WeightedAverageNumberOfDilutedSharesOutstanding': {'shares': shares},
+                      'EarningsPerShareDiluted': {'USD/shares': per_share},
+                      'NetIncomeLoss': {'USD': income}})
+
+
+def test_spin_offs_are_not_restated_as_splits():
+    """Yahoo books a spin-off as a split of the price ratio across it: AT&T
+    1.324 for Warner Bros. Discovery on 2022-04-11. Restated as a split, AT&T's
+    FY2019 diluted count read 9,729m against 7,348m filed - a 23% buyback into
+    FY2020 that never happened - and GE's and 3M's EPS was deflated for eight
+    years. The filer's own restated counts tell a split from a spin-off; with
+    no report filed since the event, the ratio decides."""
+    counts = dict(zip(range(2015, 2025), np.array(
+        [6168, 6189, 6183, 6806, 7348, 7466, 7241, 7174, 7238, 7192]) * 1e6))
+    eps = dict(zip(range(2015, 2025), [2.37, 2.10, 4.76, 2.85, 1.89, -0.75, 2.76, -1.13, 1.97, 1.49]))
+    day = '2022-04-11'
+
+    def build(ratio, restated_by, event=day):
+        splits = pd.Series([ratio], index=pd.DatetimeIndex([event]))
+        return F.build_panel('T', _weighted_count_filer(counts, eps, event, restated_by),
+                             {'sic': '4813'}, CFG, splits=splits)
+
+    p, info = build(1.324, 1.0)
+    assert p.loc['2019-12-31', 'shares_used'] == 7348e6, p['shares_used'].to_dict()
+    assert p.loc['2019-12-31', 'eps'] == 1.89 and info['splits']['n_adjusted'] == 0
+    assert info['spinoffs'] == [{'date': day, 'ratio': 1.324}] and info['split_dates'] == []
+
+    p, info = build(2.0, 2.0)                              # a 2-for-1 split, restated
+    assert p.loc['2019-12-31', 'shares_used'] == 2 * 7348e6       # filed only before it
+    assert p.loc['2020-12-31', 'shares_used'] == 2 * 7466e6       # restated by the filer
+    assert info['split_dates'] == [day] and info['spinoffs'] == []
+    # Brown-Forman's 5-for-4 (2018): no clean ratio, but the filings confirm it.
+    assert build(1.25, 1.25)[0].loc['2019-12-31', 'shares_used'] == 1.25 * 7348e6
+    # Hilton (2017): a 1-for-3 reverse split and two spin-offs, booked as one 0.4873.
+    p, info = build(0.4873, 1 / 3)
+    assert abs(p.loc['2019-12-31', 'shares_used'] - 7348e6 / 3) < 1
+    assert info['split_dates'] == [day] and abs(info['spinoffs'][0]['ratio'] - 3 * 0.4873) < 1e-12
+    # Nothing filed since: GE HealthCare's 1.281 is no split, a 3-for-1 is.
+    late = '2025-06-02'
+    assert build(1.281, 1.0, late)[0].loc['2019-12-31', 'shares_used'] == 7348e6
+    assert build(3.0, 1.0, late)[0].loc['2019-12-31', 'shares_used'] == 3 * 7348e6
+    # ConocoPhillips filed its counts in thousands from 2010: twelve of its
+    # sixteen restated counts across the 2012 Phillips 66 spin-off are a
+    # thousandfold off. A unit error is not a 1-for-1000 reverse split.
+    assert F._share_basis_change(1.311791, [0.001] * 12 + [1.0] * 4)[0] == 1.0
+    print('  splits: a spin-off keeps the filed counts; a split, confirmed or clean, restates them')
+
+
+def test_spin_off_prices_meet_the_filings_as_traded():
+    """Yahoo divides every close before a spin-off by its ratio: 3M's last
+    close before Solventum, 106.07, reads 88.69 (/1.196). With the filings no
+    longer restated by the ratio, a P/E or a market value from before the
+    spin-off must take the close as traded, or it reads 1.196 times too low."""
+    p, info, traded = synthetic_company()
+    day = p.index[-1] + pd.Timedelta(days=60)      # after the last fiscal year, before today
+    yahoo = traded.copy()
+    yahoo.loc[yahoo.index < day, 'Close'] /= 1.196
+    spun = dict(info, spinoffs=[{'date': f'{day:%Y-%m-%d}', 'ratio': 1.196}])
+    want = S.evaluate('TEST', p, info, traded, MACRO, CFG)
+    got = S.evaluate('TEST', p, spun, yahoo, MACRO, CFG)
+    assert want['pe_5yr_high'] and abs(got['pe_5yr_high'] / want['pe_5yr_high'] - 1) < 1e-9
+    mv0, mv1 = want['info']['market_value_change'], got['info']['market_value_change']
+    assert mv0 and abs(mv1 / mv0 - 1) < 1e-9, (mv0, mv1)
+    assert got['price'] == want['price']
+    blind = S.evaluate('TEST', p, info, yahoo, MACRO, CFG)
+    assert blind['pe_5yr_high'] < want['pe_5yr_high'] / 1.1
+    print(f'  spin-off prices: 5y P/E high {got["pe_5yr_high"]:.1f}, as traded '
+          f'(Yahoo\'s closes alone: {blind["pe_5yr_high"]:.1f})')
+
+
+def test_index_table_cik_wins_for_its_constituents():
+    """SEC's ticker file follows the symbol and lags when one changes hands: in
+    November 2026 it sent BNY to a BlackRock municipal bond fund and DOC to
+    Physicians Realty, whose ticker Healthpeak took in 2024 - a local run
+    valued Healthpeak's price against Physicians Realty's filings. The index
+    table names each constituent's own registrant."""
+    from datetime import datetime, timedelta, timezone
+    from valuation import sources as SRC
+    sec = {**{f'T{i}': i for i in range(6000)}, 'BNY': 1137390, 'DOC': 1574540, 'BLK': 1364742}
+    index = {'BNY': 1390777, 'DOC': 765880, 'BLK': 2012383, 'T7': 7}
+
+    def refetch(verbose):
+        raise AssertionError('a current map was fetched again')
+
+    with tempfile.TemporaryDirectory() as d:
+        old = (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_ticker_map, SRC._index_table_ciks)
+        SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH = Path(d) / 'cik.json', Path(d) / 'over.json'
+        # Complete and a day old, but cached before the rule: rebuilt, not kept.
+        SRC.CIK_MAP_PATH.write_text(json.dumps({
+            'fetched': (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+            'complete': True, 'map': sec}))
+        SRC._sec_ticker_map, SRC._index_table_ciks = (lambda verbose: dict(sec)), (lambda verbose: dict(index))
+        try:
+            m = SRC.load_cik_map(verbose=False)
+            assert (m['BNY'], m['DOC'], m['BLK'], m['T7'], m['T8']) == (1390777, 765880, 2012383, 7, 8)
+            SRC._sec_ticker_map = SRC._index_table_ciks = refetch
+            assert SRC.load_cik_map(verbose=False)['DOC'] == 765880
+            SRC.CIK_OVERRIDE_PATH.write_text(json.dumps({'BNY': 42}))
+            assert SRC.load_cik_map(verbose=False)['BNY'] == 42, 'an override lost its last word'
+        finally:
+            (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH,
+             SRC._sec_ticker_map, SRC._index_table_ciks) = old
+    # The new registrations the index points at carry their predecessors.
+    assert SRC.cik_family(1364742) == [2012383, 1364742]          # BlackRock
+    assert SRC.cik_family(1996862) == [1996862, 1144519]          # Bunge
+    assert SRC.cik_family(1832433) == [2011641, 1832433]          # Ferguson
+    assert SRC.cik_family(813828) == [2041610, 813828]            # Paramount Skydance
+    print('  cik map: the index table decides its constituents; an override still wins')
+
+
+def test_a_predecessor_counts_only_until_its_successor_reports():
+    """The old registrant often keeps filing as a subsidiary - Apache, Baker
+    Hughes Holdings and Apollo Asset Management did for years. Merged whole,
+    its later 10-K won latest-filed-wins over the parent's own figures, and its
+    cover page - a thousand shares, all held by the parent - became the
+    company's share count."""
+    from valuation import sources as SRC
+
+    def cover(val, filed):
+        return {'end': filed, 'val': val, 'filed': filed, 'form': '10-K'}
+
+    old = facts_doc({'NetIncomeLoss': {'USD': [
+        dur('2021-01-01', '2021-12-31', 5.9e9, '2022-02-25'),
+        dur('2022-01-01', '2022-12-31', 5.2e9, '2023-02-24'),
+        dur('2023-01-01', '2023-12-31', 5.5e9, '2024-02-23'),
+        dur('2024-01-01', '2024-12-31', 4.1e9, '2025-03-14')]}},       # as a subsidiary
+        dei={'EntityCommonStockSharesOutstanding': {'shares': [
+            cover(148e6, '2024-02-23'), cover(1000, '2025-03-14')]}})
+    new = facts_doc({'NetIncomeLoss': {'USD': [
+        dur('2023-01-01', '2023-12-31', 5.5e9, '2025-02-25'),
+        dur('2024-01-01', '2024-12-31', 6.4e9, '2025-02-25')]}},
+        dei={'EntityCommonStockSharesOutstanding': {'shares': [cover(155e6, '2025-02-25')]}})
+    panel, info = F.build_panel('BLK', SRC.merge_facts([new, old]), {'sic': '6211'}, CFG,
+                                splits=pd.Series(dtype=float))
+    assert list(panel['net_income']) == [5.9e9, 5.2e9, 5.5e9, 6.4e9], list(panel['net_income'])
+    assert info['cover_shares'] == 155e6, info['cover_shares']
+    assert SRC.first_annual_report(new) == '2025-02-25'
+    # A successor with no annual report yet cuts nothing: ExxonMobil's Texas
+    # holding company had filed one 10-Q.
+    q = facts_doc({'NetIncomeLoss': {'USD': [
+        dur('2026-01-01', '2026-03-31', 7.7e9, '2026-05-01', form='10-Q')]}})
+    assert SRC.first_annual_report(q) is None
+    assert len(SRC.merge_facts([q, old])['facts']['us-gaap']['NetIncomeLoss']['units']['USD']) == 5
+    print('  successions: a predecessor counts until its successor\'s first annual report')
 
 
 if __name__ == '__main__':

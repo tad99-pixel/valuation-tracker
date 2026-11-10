@@ -193,13 +193,15 @@ each now pinned by a test:
 | `form=10-K, fp=FY` rows that are quarters | Apple: 90-370-day periods under the same labels | select annual periods by measured length |
 | `fy` is the filing's year, not the period's | every company | key on the period end date |
 | Per-share history on several share bases at once | Apple pre-2014, post-7:1, post-4:1 | divide each fact by the splits after **its filing date** |
+| A spin-off booked as a split | Yahoo's split history: AT&T 1.324 (Warner Bros. Discovery), GE 1.281 and 1.253, 3M 1.196 - AT&T's FY2019 count read 9,729m against 7,348m filed | restate a "split" only if the filer's own restated share counts confirm it, or, with no filing since, if only a split produces its ratio (k-for-1, 1-for-k, 3-for-2); a historical price set against the filings is put back as traded |
 | Share counts filed in thousands or millions | NVIDIA FY08-09, Hershey 2009, Berkshire 08-09, McDonald's 2021-25, ConocoPhillips 2010-19, Garmin 2011-16 | repair exact orders of magnitude when two of three references agree: the whole history, the neighbouring years, and the year's own net income / EPS. Where the net income / EPS series runs smoothly and the filed one jumps a thousandfold, it decides alone: a long run of bad years carries both medians (ConocoPhillips: ten of nineteen years) |
 | A share count of zero | Constellation Energy before its 2022 spin-off; Ares before it became a corporation | read as no count; kept, it was a jump of "infx" that cut the per-share history |
 | A merger or listing shaped like a split | Cigna doubling its shares to buy Express Scripts; United and Continental; Datadog's IPO | a split-shaped jump stands as a split only with a split on record nearby or its one-day gap in the prices; revenue that grew with the shares, or prices that begin that year, make it an event, and the history is kept |
 | Revenue that is only part of the total | American Tower: $0.8bn of contract revenue beside $10.1bn of Revenues; Charter's $0.9bn of about $55bn; banks' fees alone | the largest revenue filed for the year - ASC 606 contract revenue leaves out leases, premiums and interest - but never the figure gross of excise taxes; for a bank, net interest income plus fees |
 | A total filed a thousandfold too large | Coherent FY2023 D&A: $681.7bn, against $267.6m + $414.1m of parts | the same vote, with depreciation + amortisation as the year's own figure |
 | Preferred stock filed at par | American Express: $1.6bn of preferred as 1,600 shares of $1m, and a value of zero | shares x liquidation price |
-| A new registrant for an old company | ExxonMobil's 2026 Texas holding company, with one quarterly report; Texas Pacific Land, a trust until 2021 | the predecessor's filings merged in, for the companies `CIK_SUCCESSIONS` names - EDGAR does not link the two |
+| A new registrant for an old company | ExxonMobil's 2026 Texas holding company, with one quarterly report; Texas Pacific Land, a trust until 2021; BlackRock, Bunge, Ferguson and Paramount, 2023-25 | the predecessor's filings merged in, for the companies `CIK_SUCCESSIONS` names - EDGAR does not link the two - up to the successor's first annual report, so a predecessor still filing as a subsidiary (Apache, Baker Hughes Holdings) cannot outvote it |
+| A ticker that changed hands | SEC's ticker.txt, unchanged since September 2022: BNY is a BlackRock municipal bond fund there, DOC is Physicians Realty, and GE HealthCare is missing | the index table's CIK for its own constituents |
 | Issued shares mistaken for outstanding | Exxon: 8.0bn issued vs 4.7bn outstanding | outstanding only |
 | A stale, pre-split cover-page share count | Mastercard: 122.5m vs 906m - a 7.4x overvaluation | cover count vetted for age and agreement |
 | Debt filed as overlapping slices | Prologis, Realty Income, Coca-Cola | compose by rule; unknown debt stays unknown |
@@ -280,6 +282,7 @@ cheaply. Instead:
 | Prices | the last few sessions, appended to the cache; if the overlap disagrees (a split restated the history) the ticker is downloaded in full |
 | Split and dividend histories | weekly, forty tickers per request, with a direct retry for any ticker missing from its batch; dividends back to 1995 |
 | Index constituents (`@sp500`) | weekly, from the index tables on Wikipedia |
+| Ticker to CIK map | every 14 days: SEC's ticker.txt, with the index tables' CIK winning for their own constituents |
 | Per-class figures (Visa, Berkshire) | each annual report once, from its XBRL in SEC's archive - which needs a contact (above) |
 
 A cached run of the 49-name watchlist takes about 20 seconds, down from 50.
@@ -544,6 +547,46 @@ short. Each change was checked on all ~500 companies before it shipped:
   when a verdict enters or leaves the four priced at or below value; and a
   crossing or band move must clear 2% from the state last reported.
 
+Config r9 (2026-11-10) fixed two data errors that the point-in-time backtest
+found in the live tracker:
+
+- **Spin-offs were restated as splits.** Yahoo books a spin-off as a
+  "split" of the price ratio across it - ninety-odd in the S&P 500's
+  histories since 2008, four of them folded into a reverse split (Hilton,
+  DuPont, Leidos, Motorola) - and every share count and EPS filed before one
+  was restated as if the shares had split: AT&T's FY2019 count read 9,729m
+  against 7,348m filed, GE's FY2014-21 counts were 1.25-1.6x too high, 3M's
+  FY2021 EPS was 8.46 against 10.12. A "split" is now restated only if the
+  filer's own restated share counts confirm it, or, with no report since,
+  if only a split produces its ratio. Every split with a split's ratio still
+  is, and so are Brown-Forman's 5-for-4 and Willis's 2.649-for-1
+  consolidation. A historical price set against the filings - the five-year
+  P/E high, the one-dollar test's market values - is taken as traded. Of
+  the 67 S&P 500 companies with a spin-off on record, ten-year EPS growth
+  moved for 36 and the share-count trend for 31; Abbott, Pentair and
+  Johnson Controls, three of r8's breaks that nothing explained, keep their
+  per-share history. No verdict moved.
+- **Tickers that changed hands were read from the wrong filer.** SEC's
+  ticker.txt has not changed since September 2022: locally, BNY was a
+  BlackRock municipal bond fund, DOC was Physicians Realty, BlackRock,
+  Bunge and Ferguson were their old registrations, and 24 newer
+  constituents (GE HealthCare, Solventum, Veralto, Cencora...) had no CIK.
+  The index tables' CIK now wins for their constituents - GitHub's runs,
+  which cannot reach SEC's file, already used them. BlackRock, Bunge,
+  Ferguson and Paramount Skydance carry their predecessors' history, each
+  predecessor cut at its successor's first annual report so that one still
+  filing as a subsidiary cannot outvote it.
+
+On the cached S&P 500 filings and the same day's prices, run locally, 478
+companies were evaluated before and 501 after. Of the 478, one verdict moved:
+Ferguson, from *insufficient data* to *good business, dear*, with six years
+on file instead of four. Healthpeak, valued on Physicians Realty's filings
+before, has a measured margin (a premium); BlackRock and Bunge are valued on
+filings to 2025 instead of 2023 and 2022. Of the 23 newly evaluated, five
+are *good business, dear*, one *fair price* (Everest), three *value
+unclear*, three *insufficient data* and eleven *No*; HONA (no annual report)
+and VYLR (declined) remain.
+
 ## Known limits
 
 - **Two value models, not three.** With 15 x earnings moved to the price
@@ -582,3 +625,12 @@ short. Each change was checked on all ~500 companies before it shipped:
 - **Cyclicals** defeat any ten-year growth rate. Growth is smoothed with
   three-year medians and capped at revenue growth and 15%, but a business at a
   cyclical peak will still look better than it is.
+- **Tickers outside the two indexes** are resolved from SEC's ticker.txt,
+  which stopped changing in September 2022: a watchlist name that changed
+  ticker or listed since then is missing or points at the old holder, until
+  it is written into `valuation_state/cik_overrides.json`.
+- **A "split" newer than the latest report** is judged by its ratio alone
+  until the next report's share counts settle it: a spin-off with a ratio
+  only a split produces (k-for-1, 1-for-k, 3-for-2) would be restated, and a
+  5-for-4 split would not. None of the ninety-odd spin-offs in the S&P 500's
+  split histories since 2008 has such a ratio.

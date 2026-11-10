@@ -57,6 +57,29 @@ def _tally(criteria: list) -> dict:
     }
 
 
+def _prices_on_filed_basis(prices: pd.DataFrame | None, info: dict):
+    """The closes on the share basis of the filings they are set against.
+
+    Yahoo divides every close before a spin-off by the price ratio across it,
+    which it books as a split, so its history runs on without a gap. The
+    filings are restated for share splits only (`fundamentals.classify_splits`):
+    a historical close set against a filed EPS or share count is multiplied
+    back by each spin-off ratio dated after it - the price as traded, against
+    the earnings and shares of the company as it then was. Without it, every
+    P/E before 3M's Solventum spin-off read 1.196 times too low, and its
+    market value at the start of the one-dollar window as much too small.
+    """
+    spins = info.get('spinoffs') or []
+    if not spins or prices is None or prices.empty or 'Close' not in prices:
+        return prices
+    factor = np.ones(len(prices))
+    for s in spins:
+        factor[prices.index < pd.Timestamp(s['date'])] *= float(s['ratio'])
+    out = prices.copy()
+    out['Close'] = prices['Close'].to_numpy(dtype=float) * factor
+    return out
+
+
 def _market_value_change(prices: pd.DataFrame | None, panel: pd.DataFrame,
                          window_years: int, basis_note=None):
     """Change in market value over the fiscal years whose retained earnings
@@ -305,12 +328,16 @@ def evaluate(ticker: str, panel: pd.DataFrame, info: dict,
     per_share_problem = _per_share_basis(price, panel, info)
     summary = M.summarise(panel, cfg, info.get('group', 'operating'), payments)
 
+    # Historical prices meet filed per-share figures in two places; both read
+    # them on the filings' basis. The current price needs nothing: a spin-off
+    # adjusts only the closes before it.
+    as_filed = _prices_on_filed_basis(prices, info)
     mv_change, mv_note = _market_value_change(
-        prices, panel, cfg.buffett.one_dollar_window_years, info.get('per_share_basis_note'))
+        as_filed, panel, cfg.buffett.one_dollar_window_years, info.get('per_share_basis_note'))
     info['market_value_change'] = mv_change
     info['market_value_note'] = mv_note
 
-    pe_high, pe_high_note = G.pe_five_year_high(panel, prices)
+    pe_high, pe_high_note = G.pe_five_year_high(panel, as_filed)
 
     defensive = G.defensive_criteria(panel, info, summary, price, macro, cfg)
     enterprising = G.enterprising_criteria(panel, info, summary, price, macro,

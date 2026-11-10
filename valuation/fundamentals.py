@@ -35,6 +35,7 @@ import datetime as dt
 import hashlib
 import json
 import warnings
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -629,6 +630,159 @@ def _split_factors(filed: pd.Series, splits: pd.Series) -> pd.Series:
     return pd.Series(out, index=filed.index)
 
 
+# ---------------------------------------------------------------------------
+# Splits and spin-offs
+# ---------------------------------------------------------------------------
+#
+# Yahoo books a spin-off as a "stock split" of the price ratio across it - GE
+# 1.281 for GE HealthCare, 3M 1.196 for Solventum, AT&T 1.324 for Warner Bros.
+# Discovery - and its split histories hold over ninety of them across the
+# S&P 500. Restated as splits, they multiplied every share count filed before
+# the spin-off and divided every EPS: AT&T's FY2019 diluted count read 9,729m
+# against 7,348m filed, a 23% buyback that never happened, and GE's FY2014-21
+# counts were 1.25-1.6x too high. A spin-off hands out value, not shares; the
+# parent's share count does not move.
+#
+# The filer's own restatement tells the two apart. ASC 260 restates the
+# weighted share count of every period presented for a split or a stock
+# dividend, and never for a spin-off, so the same period's count filed after
+# the event over the one filed before it is the share-basis change: exactly
+# the ratio for a split (Apple 7.0, Brown-Forman's 5-for-4 1.25), 1.0 for a
+# spin-off. Where no filing straddles the event - before XBRL, or a split
+# newer than the latest report - the ratio decides: only a split produces
+# k-for-1, 1-for-k or 3-for-2.
+BASIS_EVIDENCE_TAGS = tuple(DURATION_CONCEPTS['shares_diluted'] + DURATION_CONCEPTS['shares_basic']) + (
+    'WeightedAverageNumberOfShareOutstandingBasicAndDiluted',)
+# A restated count votes for the change it is within 1% of (log distance).
+BASIS_EVIDENCE_TOL = 0.01
+# Only the next reports' comparatives are read: a restatement years later can
+# be for something else (a recast for a merger, a new dilution rule).
+BASIS_EVIDENCE_MONTHS = 15
+# How near a Yahoo ratio must be to k-for-1, 1-for-k or 3-for-2 to be read as
+# a split unaided. Other round ratios are not: spin-offs land on them - GE
+# Vernova's 1.253 and Hewlett Packard Enterprise's 1.335 are within a quarter
+# of a percent of 5-for-4 and 4-for-3.
+SPLIT_RATIO_TOL = 0.005
+
+
+def _nearest_split_ratio(x: float) -> float:
+    """The share-split ratio nearest `x`: k-for-1, 1-for-k, 3-for-2 or 2-for-3,
+    with k at most 100 (`SPLIT_RATIOS`). A thousandfold move is a filing's
+    unit error, not a split: ConocoPhillips filed its 2010-19 counts in
+    thousands, and a count filed before its 2012 spin-off over one filed
+    after read as a 1-for-1000 "reverse split" that restated 2007-09."""
+    up = x >= 1
+    k = min(float(SPLIT_RATIOS[-1]), max(2.0, float(round(x if up else 1.0 / x))))
+    return min((k, 1.5) if up else (1.0 / k, 1.0 / 1.5), key=lambda c: abs(np.log(x / c)))
+
+
+def is_split_ratio(x: float, tol: float = SPLIT_RATIO_TOL) -> bool:
+    """Is `x` a ratio only a share split produces?"""
+    return bool(x > 0) and abs(np.log(x / _nearest_split_ratio(x))) <= tol
+
+
+def _weighted_share_rows(facts: dict) -> dict:
+    """Every weighted share count filed: ``{(tag, start, end): [(filed, accn, value)]}``."""
+    gaap = (facts.get('facts') or {}).get('us-gaap') or {}
+    out: dict = {}
+    for tag in BASIS_EVIDENCE_TAGS:
+        for r in ((gaap.get(tag) or {}).get('units') or {}).get('shares') or []:
+            v = r.get('val')
+            if not r.get('filed') or not r.get('start') or not r.get('end') \
+                    or not isinstance(v, (int, float)) or not v > 0:
+                continue
+            out.setdefault((tag, r['start'], r['end']), []).append(
+                (str(r['filed'])[:10], str(r.get('accn', '')), float(v)))
+    return out
+
+
+def _restated_ratios(rows: dict, when, since=None, until=None) -> list:
+    """How the filer restated its share counts across `when`.
+
+    For each period ending before `when`: the first count filed on or after it
+    over the last one filed before it. Filings are read only between the
+    neighbouring events (`since`, `until`), so two splits a few months apart
+    are each measured on their own.
+    """
+    day = pd.Timestamp(when)
+    d = day.strftime('%Y-%m-%d')
+    lo = pd.Timestamp(since).strftime('%Y-%m-%d') if since is not None else ''
+    hi = day + pd.DateOffset(months=BASIS_EVIDENCE_MONTHS)
+    if until is not None:
+        hi = min(hi, pd.Timestamp(until))
+    hi = hi.strftime('%Y-%m-%d')
+    out = []
+    for (_, _, end), filings in rows.items():
+        if end >= d:
+            continue
+        before = [f for f in filings if lo <= f[0] < d]
+        after = [f for f in filings if d <= f[0] < hi]
+        if before and after:
+            out.append(min(after)[2] / max(before)[2])
+    return out
+
+
+def _share_basis_change(ratio: float, restated: list) -> tuple:
+    """``(change, how)``: the part of a Yahoo split `ratio` that changed the
+    share basis - `ratio` itself for a split, 1.0 for a spin-off.
+
+    Each restated count votes for the change it is within `BASIS_EVIDENCE_TOL`
+    of: the ratio, no change, or a split inside the ratio - Hilton's 1-for-3
+    reverse split, booked with its two spin-offs as one "split" of 0.487. The
+    majority of the votes cast decides; no votes, and the ratio does
+    (`is_split_ratio`). Evidence turns a clean ratio into a spin-off only if
+    what is left is a plausible distribution: Berkshire's counts are in
+    Class A equivalents, which its 50-for-1 Class B split left alone.
+    """
+    votes: Counter = Counter()
+    for x in restated:
+        h = min((ratio, 1.0), key=lambda c: abs(np.log(x / c)))
+        if abs(np.log(x / h)) > BASIS_EVIDENCE_TOL:
+            k = _nearest_split_ratio(x)
+            ok = abs(np.log(x / k)) <= BASIS_EVIDENCE_TOL and ratio / k > 1 + BASIS_EVIDENCE_TOL
+            h = k if ok else None
+        if h is not None:
+            votes[h] += 1
+    clean = is_split_ratio(ratio)
+    if votes:
+        k, n = votes.most_common(1)[0]
+        if 2 * n > sum(votes.values()) and (not clean or k == ratio or 0.5 <= ratio / k <= 4):
+            return k, 'the filed share counts'
+    return (ratio if clean else 1.0), 'its ratio'
+
+
+def classify_splits(facts: dict, splits) -> tuple:
+    """Yahoo's split history, divided into share splits and the rest.
+
+    Returns ``(basis, spinoffs, notes)``: `basis` the share-basis change at
+    each date (a Series of ratios, possibly empty), which is what the filed
+    per-share facts and share counts are restated by; `spinoffs` the rest of
+    each ratio, a distribution of value, which Yahoo's prices are adjusted by
+    and the filings are not (`score` takes it back out of a historical price
+    before setting it against them); and `notes`, a line for each event that
+    was not restated as booked.
+    """
+    if splits is None or len(splits) == 0:
+        return splits, pd.Series(dtype=float), []
+    s = splits.sort_index()
+    rows = _weighted_share_rows(facts)
+    dates = list(pd.DatetimeIndex(s.index))
+    basis, spins, notes = {}, {}, []
+    for i, (d, r) in enumerate(zip(dates, s.to_numpy(dtype=float))):
+        k, how = _share_basis_change(r, _restated_ratios(
+            rows, d, dates[i - 1] if i else None, dates[i + 1] if i + 1 < len(dates) else None))
+        if k != 1.0:
+            basis[d] = basis.get(d, 1.0) * k
+        if r / k != 1.0:
+            spins[d] = spins.get(d, 1.0) * (r / k)
+        if k != r:
+            split = f'{k:g}-for-1 split' if k > 1 else f'1-for-{1 / k:.3g} reverse split'
+            notes.append(f'{d:%Y-%m-%d} x{r:g}: '
+                         + ('a spin-off' if k == 1.0 else f'a {split} and a spin-off')
+                         + f', by {how}')
+    return pd.Series(basis, dtype=float), pd.Series(spins, dtype=float), notes
+
+
 def build_panel(ticker: str, facts: dict, meta: dict,
                 cfg: ValuationConfig, splits: pd.Series | None = None) -> tuple:
     """Return ``(annual DataFrame, info dict)`` for one company.
@@ -641,7 +795,9 @@ def build_panel(ticker: str, facts: dict, meta: dict,
     Per-share series are restated onto today's share basis using `splits`.
     Pass `splits=None` only when the company has never split; otherwise the
     per-share history spans several bases and every per-share test built on it
-    is meaningless.
+    is meaningless. Only the share splits in it are restated: the spin-offs
+    Yahoo books as splits are not (`classify_splits`), and are recorded in
+    ``info['spinoffs']`` for `score`, which takes them back out of the prices.
     """
     duration, tags_used, filed_dates = {}, {}, {}
     for concept, tags in DURATION_CONCEPTS.items():
@@ -658,14 +814,16 @@ def build_panel(ticker: str, facts: dict, meta: dict,
             tags_used[concept] = sorted(set(used))
 
     # Restate per-share facts and share counts onto the current basis before
-    # anything is aligned or derived from them.
-    split_report = {'applied': False, 'n_adjusted': 0, 'max_factor': 1.0}
-    if splits is not None and len(splits):
+    # anything is aligned or derived from them - for the share splits only.
+    basis, spinoffs, not_splits = classify_splits(facts, splits)
+    split_report = {'applied': False, 'n_adjusted': 0, 'max_factor': 1.0,
+                    'n_spinoffs': int(len(spinoffs)), 'not_splits': not_splits}
+    if basis is not None and len(basis):
         for concept in PER_SHARE_CONCEPTS + SHARE_COUNT_CONCEPTS:
             src = duration if concept in duration else (instant if concept in instant else None)
             if src is None or concept not in filed_dates:
                 continue
-            f = _split_factors(filed_dates[concept], splits)
+            f = _split_factors(filed_dates[concept], basis)
             f = f.reindex(src[concept].index).fillna(1.0)
             if concept in PER_SHARE_CONCEPTS:
                 src[concept] = src[concept] / f
@@ -675,7 +833,7 @@ def build_panel(ticker: str, facts: dict, meta: dict,
             split_report['n_adjusted'] += n
             split_report['max_factor'] = max(split_report['max_factor'], float(f.max()))
         split_report['applied'] = True
-        split_report['n_splits'] = int(len(splits))
+        split_report['n_splits'] = int(len(basis))
 
     if 'net_income' not in duration and 'equity' not in instant:
         return None, {'ticker': ticker, 'error': 'no usable XBRL facts'}
@@ -721,8 +879,8 @@ def build_panel(ticker: str, facts: dict, meta: dict,
     from_identity = int(panel.attrs.get('shares_from_identity', 0))
 
     cover, cover_date, cover_filed = _dei_shares_outstanding(facts)
-    if cover is not None and splits is not None and len(splits):
-        f = _split_factors(pd.Series([cover_filed], index=[0]), splits).iloc[0]
+    if cover is not None and basis is not None and len(basis):
+        f = _split_factors(pd.Series([cover_filed], index=[0]), basis).iloc[0]
         cover = float(cover * f)
     sic = meta.get('sic')
     info = {
@@ -750,9 +908,14 @@ def build_panel(ticker: str, facts: dict, meta: dict,
         # `score` withholds every price comparison when it is False.
         'splits_known': splits is not None,
         # For `score`, which asks whether a split-shaped jump in the share
-        # count had a split on record near it.
-        'split_dates': ([pd.Timestamp(d).strftime('%Y-%m-%d') for d in splits.index]
-                        if splits is not None and len(splits) else []),
+        # count had a split on record near it. Share splits only: a spin-off
+        # explains no jump in a share count.
+        'split_dates': ([pd.Timestamp(d).strftime('%Y-%m-%d') for d in basis.index]
+                        if basis is not None and len(basis) else []),
+        # The spin-offs among Yahoo's "splits": the ratio its closes before
+        # each date are divided by and the filings are not.
+        'spinoffs': [{'date': pd.Timestamp(d).strftime('%Y-%m-%d'), 'ratio': float(v)}
+                     for d, v in spinoffs.items()],
         'error': None,
     }
     info.update(_share_basis_diagnostic(panel))

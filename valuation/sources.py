@@ -120,7 +120,11 @@ def _norm_ticker(t: str) -> str:
 
 
 def _read_cik_cache():
-    """``(map, fetched, complete)`` from disk, or None."""
+    """``(map, fetched, complete, index_first)`` from disk, or None.
+
+    `index_first` marks a map built with the index tables' CIKs preferred
+    for their constituents (see `load_cik_map`); one built before that rule
+    is rebuilt on its next load."""
     blob = _read_json(CIK_MAP_PATH, None)
     if not blob:
         return None
@@ -131,7 +135,8 @@ def _read_cik_cache():
         return None
     # A map written before the flag existed came from ticker.txt if it is that
     # large; the index-table fallback tops out near 1,100 names.
-    return m, fetched, bool(blob.get('complete', len(m) > 5000))
+    return (m, fetched, bool(blob.get('complete', len(m) > 5000)),
+            bool(blob.get('index_first', False)))
 
 
 def _sec_ticker_map(verbose: bool) -> dict:
@@ -223,22 +228,39 @@ def load_cik_map(refresh_days: int = 14, verbose: bool = True, force: bool = Fal
     to: one afternoon with ticker.txt unreachable overwrote ten thousand
     tickers with eleven hundred, and every company outside the two indexes
     read "no CIK" for the next fortnight.
+
+    For the indexes' own constituents, the index table's CIK wins. SEC's
+    ticker.txt has not changed since September 2022 (its Last-Modified date),
+    so a ticker that changed hands since points at its old holder: in
+    November 2026 it sent BNY to a BlackRock municipal bond fund (BNY Mellon,
+    1390777, is still listed under BK) and DOC to Physicians Realty, whose
+    ticker Healthpeak (765880) took in 2024, and BlackRock, Bunge and Ferguson
+    to the registrations they had left (see `config.CIK_SUCCESSIONS`). A
+    newer listing - GE HealthCare, Solventum, Veralto - is not in it at all.
+    The index tables name each constituent's current registrant; a ticker
+    outside them still depends on the old file, or on an override.
     """
     cache = _read_cik_cache()
     now = datetime.now(timezone.utc)
-    if cache and not force and cache[2] and now - cache[1] < timedelta(days=refresh_days):
+    if (cache and not force and cache[2] and cache[3]
+            and now - cache[1] < timedelta(days=refresh_days)):
         return _with_overrides(cache[0])
 
-    out = _sec_ticker_map(verbose)
-    complete = len(out) >= 1000
-    if not complete:
-        for k, v in _index_table_ciks(verbose).items():
-            out.setdefault(k, v)
+    sec = _sec_ticker_map(verbose)
+    complete = len(sec) >= 1000
+    index = _index_table_ciks(verbose)
+    moved = sorted(t for t, c in index.items() if t in sec and sec[t] != c)
+    if verbose and moved:
+        print(f'  cik map: the index tables override SEC\'s ticker file for {len(moved)}: '
+              + ', '.join(f'{t} {sec[t]}->{index[t]}' for t in moved[:8])
+              + (' ...' if len(moved) > 8 else ''))
+    out = {**sec, **index}
 
     if not complete and cache and cache[2]:
         if verbose:
-            print('  cik map: keeping the complete cached map; the partial one only adds to it')
-        return _with_overrides({**out, **cache[0]})
+            print('  cik map: keeping the complete cached map; the partial one only adds to '
+                  'it, and the index tables still decide their own constituents')
+        return _with_overrides({**out, **cache[0], **index})
     if not out:
         if cache:
             if verbose:
@@ -248,7 +270,9 @@ def load_cik_map(refresh_days: int = 14, verbose: bool = True, force: bool = Fal
             'Could not build a ticker -> CIK map from SEC ticker.txt or the '
             'index tables. Fundamentals cannot be fetched without it. Check '
             f'connectivity, or write a map by hand to {CIK_OVERRIDE_PATH}.')
-    _write_json(CIK_MAP_PATH, {'fetched': now.isoformat(), 'complete': complete, 'map': out})
+    # Built without the index tables (unreachable), it is rebuilt next time.
+    _write_json(CIK_MAP_PATH, {'fetched': now.isoformat(), 'complete': complete,
+                               'index_first': bool(index), 'map': out})
     return _with_overrides(out)
 
 
@@ -390,22 +414,56 @@ def cik_family(cik: int) -> list:
     return [cik]
 
 
+# The reports whose first appearance under a new registration means it has
+# taken over as the company's filer. Originals: an amendment never comes first.
+ANNUAL_REPORT_FORMS = frozenset({'10-K', '10-KT', '20-F', '40-F'})
+
+
+def first_annual_report(doc: dict):
+    """The filing date (ISO) of the first annual report in a companyfacts
+    document, or None if it holds none yet."""
+    first = None
+    for concepts in (doc.get('facts') or {}).values():
+        for node in concepts.values():
+            for rows in (node.get('units') or {}).values():
+                for r in rows:
+                    f = r.get('filed')
+                    if f and r.get('form') in ANNUAL_REPORT_FORMS and (first is None or f < first):
+                        first = f
+    return str(first)[:10] if first else None
+
+
 def merge_facts(docs: list) -> dict:
-    """One companyfacts document from a company's successive registrations.
+    """One companyfacts document from a company's successive registrations,
+    current first (`cik_family` order).
 
     Every fact from every registration, side by side: `fundamentals` already
     keeps the most recently filed value for each period, so where the new
     registration restates a year the old one filed, the restatement wins -
     exactly as it does for any restatement within one registration.
+
+    Each earlier registration counts only for what it filed before the one
+    that followed it filed its first annual report. After that it is a
+    subsidiary or a shell - Apache, Baker Hughes Holdings LLC and Apollo
+    Asset Management kept filing 10-Ks for years after their parents took
+    over - and its figures are not the company's. Merged whole, a subsidiary's
+    later report won latest-filed-wins over the parent's own, its cover-page
+    share count included. A successor with no annual report yet cuts nothing:
+    until it files one, the predecessor's are the company's latest.
     """
     out = {'cik': docs[0].get('cik'), 'entityName': docs[0].get('entityName'), 'facts': {}}
-    for doc in docs:
+    for i, doc in enumerate(docs):
+        cut = first_annual_report(docs[i - 1]) if i else None
         for taxonomy, concepts in (doc.get('facts') or {}).items():
             into = out['facts'].setdefault(taxonomy, {})
             for name, node in concepts.items():
-                units = into.setdefault(name, {'units': {}})['units']
                 for unit, rows in (node.get('units') or {}).items():
-                    units.setdefault(unit, []).extend(rows)
+                    if cut:
+                        # ISO dates compare as strings; a fact with no filing
+                        # date cannot be shown to precede the cut.
+                        rows = [r for r in rows if r.get('filed') and str(r['filed'])[:10] < cut]
+                    if rows:
+                        into.setdefault(name, {'units': {}})['units'].setdefault(unit, []).extend(rows)
     return out
 
 
@@ -1098,7 +1156,9 @@ def get_splits(tickers, max_age_days: int = 7, force: bool = False,
     comparative years that appear in a later annual report - so Apple's EPS
     history arrives on three different bases at once (pre-2014, post-7:1, and
     post-4:1 from 2020). The correction is applied per fact, using the splits
-    after the date that fact was *filed*.
+    after the date that fact was *filed*. Yahoo books spin-offs here too, as
+    "splits" of the price ratio across them; `fundamentals.classify_splits`
+    keeps those from being restated as share splits.
 
     Three cache rules, each the fix for a way an earlier version lied:
 
