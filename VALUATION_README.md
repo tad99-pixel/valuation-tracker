@@ -121,10 +121,11 @@ number. The verdict is deliberately coarse:
 
 `.github/workflows/valuation.yml` runs the tracker at 22:30 UTC on weekdays
 (after the US close), on any push that changes the code or the watchlist, and
-on demand from the Actions tab ("Run workflow"). GitHub drops scheduled runs
-when it is busy - the first evening's never started - so a second schedule
-at 03:30 UTC catches up, and does nothing if the evening run recorded the
-day's close. Each run:
+on demand from the Actions tab ("Run workflow"). GitHub drops and delays
+scheduled runs when it is busy - the first evening's never started, and the
+first catch-up began 44 minutes late - so a second schedule at 03:30 UTC
+catches up. A scheduled run does nothing when the history already holds the
+latest close; pushes and manual runs always run in full. Each run:
 
 1. runs the regression tests, and stops if any fail;
 2. restores the previous run's downloads (filings, prices, splits and

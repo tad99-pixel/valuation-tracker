@@ -5,8 +5,10 @@ name: Valuation tracker
 on:
   schedule:
     - cron: '30 22 * * 1-5'   # 22:30 UTC = 17:30 New York in winter, 18:30 in summer
-    # Catch-up: GitHub drops scheduled runs when it is busy. This one does
-    # nothing if the evening run already recorded the day's close.
+    # Catch-up: GitHub drops and delays scheduled runs when it is busy (the
+    # first evening's never started). Every scheduled run does nothing when
+    # the history already holds the latest close, so this one only works
+    # when the evening run did not.
     - cron: '30 3 * * 2-6'
   workflow_dispatch:           # "Run workflow" button on the Actions tab
   push:                        # a code or watchlist change re-runs it
@@ -94,7 +96,11 @@ jobs:
           VALUATION_USER_AGENT: ${{ secrets.VALUATION_USER_AGENT }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           VALUATION_ALERTS: _alerts.md
-          CATCH_UP: ${{ github.event.schedule == '30 3 * * 2-6' }}
+          # Any scheduled run, not one matched by its cron string: the first
+          # catch-up ran in full with CATCH_UP false. Pushes and manual runs
+          # always run in full.
+          CATCH_UP: ${{ github.event_name == 'schedule' }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
           if [ "$CATCH_UP" = "true" ]; then
             python run_valuation.py --catch-up
