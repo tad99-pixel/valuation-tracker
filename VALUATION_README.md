@@ -347,7 +347,7 @@ estimate. What moved, and why:
 Config r7 changed no watchlist verdict; Mastercard's dividend record now
 passes at twenty years, the 41st.
 
-### The S&P 500, 2026-11-09 (config r7)
+### The S&P 500, from 2026-11-09 (config r7)
 
 503 tickers, 501 evaluated: HONA, newly listed, has filed no annual report
 yet, and VYLR is declined on SEC's entity type. The margin of safety is
@@ -373,6 +373,16 @@ prices, not a recommendation.
 The margin is withheld for 208 companies: 108 have one model that can value
 them, and for 96 the DCF and the EPV are more than 3x apart. 261 of the 501
 have a verified record of twenty years of dividends or more.
+
+Under config r8, on Monday's closes, the margin is measurable for **313**
+(from 260) - all 27 REITs and 26 of the 37 utilities for the first time -
+and the median is still 1.84x, with 28 below their estimate and 8 below
+two-thirds of it. *Candidate* 5 (Deckers slipped to *fair price* on the
+day's prices), *cheap, quality passes* 3, *fair price* 6 (Boston
+Properties joins), *statistically cheap only* 7 (Alexandria and Camden
+join), *dear* 162, *value unclear* 73, *No* 235, *insufficient data* 10.
+Of the 166 margins withheld, 60 have one model and 106 have models more
+than 3x apart.
 
 ## How it was checked
 
@@ -516,9 +526,9 @@ short. Each change was checked on all ~500 companies before it shipped:
   takes over only at twice the first; simply taking the largest read
   Hasbro's and Republic Services' totals before eliminations.
 - **REITs and utilities can have a margin of safety.** None of 27 REITs or
-  37 utilities could before; on the local check, 25 REITs and 26 utilities
-  now do, with REITs at a median 1.33x their estimate and utilities at 2.19x.
-  Most still score *No* on Buffett's quality proxies, as before.
+  37 utilities could before; all 27 REITs and 26 of the utilities now do,
+  REITs at a median 1.32x their estimate and utilities at 2.10x. Most still
+  score *No* on Buffett's quality proxies, as before.
 - **Mergers and listings are no longer read as missed splits.** Of the
   split-shaped breaks, Cigna, Global Payments, Evergy, United, Viatris,
   Republic Services, Keurig Dr Pepper, Workday, Palantir and eight listings
@@ -544,9 +554,9 @@ short. Each change was checked on all ~500 companies before it shipped:
   as well; REITs, capitalised FFO beside the DCF.
 - **Utilities at 9%.** A utility's earnings and book are valued at the same
   required return as any business's. Investors have long accepted less from
-  regulated returns, so at 9% most utilities read as dear - a median 2.2x
-  their estimate on the local check; the reverse DCF shows the growth their
-  prices assume at that rate.
+  regulated returns, so at 9% most utilities read as dear - a median 2.1x
+  their estimate; the reverse DCF shows the growth their prices assume at
+  that rate.
 - **Twenty years of dividends** come from the filings and, before them, the
   dividend record in Yahoo's price history, which begins at listing. A year
   the record covers only in part counts as paid if a dividend went ex in it,
