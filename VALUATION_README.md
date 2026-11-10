@@ -171,7 +171,8 @@ anywhere. Visa's and Berkshire's per-class figures are read from it (see
 *Known limits*), so until a secret named `VALUATION_USER_AGENT` holds a
 contact - for example `ValuationTracker/1.0 you@example.com`; SEC asks
 automated clients to identify themselves - those two stay *Insufficient
-data*. The same secret covers a ticker outside both indexes, or 403s from
+data*. The same secret covers a ticker outside both indexes (EDGAR's company
+search, which needs no contact, may place one without it), or 403s from
 SEC's data endpoints in the run log.
 
 GitHub disables scheduled workflows in a public repository after 60 days with
@@ -201,7 +202,7 @@ each now pinned by a test:
 | A total filed a thousandfold too large | Coherent FY2023 D&A: $681.7bn, against $267.6m + $414.1m of parts | the same vote, with depreciation + amortisation as the year's own figure |
 | Preferred stock filed at par | American Express: $1.6bn of preferred as 1,600 shares of $1m, and a value of zero | shares x liquidation price |
 | A new registrant for an old company | ExxonMobil's 2026 Texas holding company, with one quarterly report; Texas Pacific Land, a trust until 2021; BlackRock, Bunge, Ferguson and Paramount, 2023-25 | the predecessor's filings merged in, for the companies `CIK_SUCCESSIONS` names - EDGAR does not link the two - up to the successor's first annual report, so a predecessor still filing as a subsidiary (Apache, Baker Hughes Holdings) cannot outvote it |
-| A ticker that changed hands | SEC's ticker.txt, unchanged since September 2022: BNY is a BlackRock municipal bond fund there, DOC is Physicians Realty, and GE HealthCare is missing | the index table's CIK for its own constituents |
+| A ticker that changed hands | SEC's ticker.txt, unchanged since September 2022: BNY is a BlackRock municipal bond fund there, DOC is Physicians Realty, and GE HealthCare is missing | the index table's CIK for its own constituents; every ticker must be listed by its filer's own record, or is looked up in EDGAR's company search |
 | Issued shares mistaken for outstanding | Exxon: 8.0bn issued vs 4.7bn outstanding | outstanding only |
 | A stale, pre-split cover-page share count | Mastercard: 122.5m vs 906m - a 7.4x overvaluation | cover count vetted for age and agreement |
 | Debt filed as overlapping slices | Prologis, Realty Income, Coca-Cola | compose by rule; unknown debt stays unknown |
@@ -282,7 +283,8 @@ cheaply. Instead:
 | Prices | the last few sessions, appended to the cache; if the overlap disagrees (a split restated the history) the ticker is downloaded in full |
 | Split and dividend histories | weekly, forty tickers per request, with a direct retry for any ticker missing from its batch; dividends back to 1995 |
 | Index constituents (`@sp500`) | weekly, from the index tables on Wikipedia |
-| Ticker to CIK map | every 14 days: SEC's ticker.txt, with the index tables' CIK winning for their own constituents |
+| Ticker to CIK map | every 14 days: SEC's maintained ticker file where SEC serves it (it wants a contact), else its ticker.txt, frozen since 2022, with the index tables' CIK winning for their own constituents |
+| Ticker check | every run, against each filer's own filing index (already fetched); a ticker its filer does not list, or the map lacks, goes to EDGAR's company search, whose answer is kept 14 days (a miss, one) |
 | Per-class figures (Visa, Berkshire) | each annual report once, from its XBRL in SEC's archive - which needs a contact (above) |
 
 A cached run of the 49-name watchlist takes about 20 seconds, down from 50.
@@ -575,7 +577,13 @@ found in the live tracker:
   which cannot reach SEC's file, already used them. BlackRock, Bunge,
   Ferguson and Paramount Skydance carry their predecessors' history, each
   predecessor cut at its successor's first annual report so that one still
-  filing as a subsidiary cannot outvote it.
+  filing as a subsidiary cannot outvote it. For a ticker outside the
+  indexes, SEC's maintained file is read where SEC serves it (it wants a
+  contact), and every ticker must be listed by its own filer's record, which
+  all 503 of the S&P 500 are; one that is not, or that the map lacks, is
+  looked up in EDGAR's company search, which needs no contact. Tried on the
+  S&P 500 with no index table at all, that placed all 503 - 26 of them by
+  the search, BNY and DOC among them.
 
 On the cached S&P 500 filings and the same day's prices, run locally, 478
 companies were evaluated before and 501 after. Of the 478, one verdict moved:
@@ -625,10 +633,12 @@ and VYLR (declined) remain.
 - **Cyclicals** defeat any ten-year growth rate. Growth is smoothed with
   three-year medians and capped at revenue growth and 15%, but a business at a
   cyclical peak will still look better than it is.
-- **Tickers outside the two indexes** are resolved from SEC's ticker.txt,
-  which stopped changing in September 2022: a watchlist name that changed
-  ticker or listed since then is missing or points at the old holder, until
-  it is written into `valuation_state/cik_overrides.json`.
+- **Tickers outside the two indexes** rest on EDGAR's company search
+  whenever SEC's frozen ticker.txt is wrong about them or lacks them, since
+  SEC's maintained file needs a contact. If the search is unreachable too, a
+  ticker the old file maps to a filer that no longer trades under it is
+  left out with a note in the log, until its CIK is written into
+  `valuation_state/cik_overrides.json`.
 - **A "split" newer than the latest report** is judged by its ratio alone
   until the next report's share counts settle it: a spin-off with a ratio
   only a split produces (k-for-1, 1-for-k, 3-for-2) would be restated, and a

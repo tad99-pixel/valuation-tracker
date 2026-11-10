@@ -841,13 +841,14 @@ def test_partial_cik_map_never_replaces_a_complete_one():
     from datetime import datetime, timedelta, timezone
     from valuation import sources as SRC
     with tempfile.TemporaryDirectory() as d:
-        old = (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_ticker_map, SRC._index_table_ciks)
+        old = (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_current_map,
+               SRC._sec_ticker_map, SRC._index_table_ciks)
         SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH = Path(d) / 'cik.json', Path(d) / 'none.json'
         full = {f'T{i}': i for i in range(6000)}
         SRC.CIK_MAP_PATH.write_text(json.dumps({
             'fetched': (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(),
             'complete': True, 'map': full}))
-        SRC._sec_ticker_map = lambda verbose: {}
+        SRC._sec_current_map = SRC._sec_ticker_map = lambda verbose: {}
         SRC._index_table_ciks = lambda verbose: {'NEWCO': 99999, 'T1': 5}
         try:
             m = SRC.load_cik_map(verbose=False)
@@ -856,7 +857,7 @@ def test_partial_cik_map_never_replaces_a_complete_one():
             kept = json.loads(SRC.CIK_MAP_PATH.read_text())
             assert kept['complete'] and len(kept['map']) == 6000, 'partial map overwrote it'
         finally:
-            (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH,
+            (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_current_map,
              SRC._sec_ticker_map, SRC._index_table_ciks) = old
     print('  cik map: a partial fallback adds to the complete map, never replaces it')
 
@@ -864,7 +865,7 @@ def test_partial_cik_map_never_replaces_a_complete_one():
 def test_funds_are_declined_by_entity_type():
     from valuation import sources as SRC
     old = (SRC.resolve_ciks, SRC.fetch_submissions, SRC.fetch_companyfacts)
-    SRC.resolve_ciks = lambda tickers, verbose=True: ({'SPY': 884394}, [])
+    SRC.resolve_ciks = lambda tickers, verbose=True, cfg=None: ({'SPY': 884394}, [])
     SRC.fetch_submissions = lambda cik, cfg, force=False: {'entityType': 'other', 'name': 'SPDR'}
     SRC.fetch_companyfacts = lambda *a, **k: (_ for _ in ()).throw(AssertionError('fetched'))
     try:
@@ -1446,22 +1447,26 @@ def test_index_table_cik_wins_for_its_constituents():
         raise AssertionError('a current map was fetched again')
 
     with tempfile.TemporaryDirectory() as d:
-        old = (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_ticker_map, SRC._index_table_ciks)
+        old = (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_current_map,
+               SRC._sec_ticker_map, SRC._index_table_ciks)
         SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH = Path(d) / 'cik.json', Path(d) / 'over.json'
         # Complete and a day old, but cached before the rule: rebuilt, not kept.
         SRC.CIK_MAP_PATH.write_text(json.dumps({
             'fetched': (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
             'complete': True, 'map': sec}))
+        SRC._sec_current_map = lambda verbose: {}            # no contact: refused
         SRC._sec_ticker_map, SRC._index_table_ciks = (lambda verbose: dict(sec)), (lambda verbose: dict(index))
         try:
             m = SRC.load_cik_map(verbose=False)
             assert (m['BNY'], m['DOC'], m['BLK'], m['T7'], m['T8']) == (1390777, 765880, 2012383, 7, 8)
-            SRC._sec_ticker_map = SRC._index_table_ciks = refetch
+            cache = SRC._read_cik_cache()
+            assert cache.index_ciks == index and not cache.current, 'provenance not kept'
+            SRC._sec_current_map = SRC._sec_ticker_map = SRC._index_table_ciks = refetch
             assert SRC.load_cik_map(verbose=False)['DOC'] == 765880
             SRC.CIK_OVERRIDE_PATH.write_text(json.dumps({'BNY': 42}))
             assert SRC.load_cik_map(verbose=False)['BNY'] == 42, 'an override lost its last word'
         finally:
-            (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH,
+            (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_current_map,
              SRC._sec_ticker_map, SRC._index_table_ciks) = old
     # The new registrations the index points at carry their predecessors.
     assert SRC.cik_family(1364742) == [2012383, 1364742]          # BlackRock
@@ -1505,6 +1510,99 @@ def test_a_predecessor_counts_only_until_its_successor_reports():
     assert SRC.first_annual_report(q) is None
     assert len(SRC.merge_facts([q, old])['facts']['us-gaap']['NetIncomeLoss']['units']['USD']) == 5
     print('  successions: a predecessor counts until its successor\'s first annual report')
+
+
+def test_tickers_are_confirmed_by_their_filers():
+    """SEC's ticker.txt stopped changing in September 2022, and the file it
+    maintains is refused without a contact. Outside the index tables, a ticker
+    that changed hands since kept pointing at its old holder - BNY at a
+    BlackRock municipal fund, DOC at Physicians Realty - and a newer listing
+    had no CIK at all. Each ticker is now confirmed by its filer's own record
+    and, failing that, looked up in EDGAR's company search."""
+    from datetime import datetime, timedelta, timezone
+    from valuation import sources as SRC
+    records = {21344: ['KO'], 1137390: [], 1574540: [], 555: ['GONE2'], 777: ['IDX2'],
+               1390777: ['BNY', 'BNY-PK'], 765880: ['DOC'], 4242: ['NEWCO']}
+    found_by_search = {'BNY': 1390777, 'DOC': 765880, 'NEWCO': 4242}
+    asked = []
+
+    def search(ticker):
+        asked.append(ticker)
+        return found_by_search.get(ticker), ticker != 'DOWN'
+
+    with tempfile.TemporaryDirectory() as d:
+        old = (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC.CIK_SEARCH_PATH,
+               SRC.fetch_submissions, SRC._search_ticker)
+        SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH = Path(d) / 'cik.json', Path(d) / 'over.json'
+        SRC.CIK_SEARCH_PATH = Path(d) / 'search.json'
+        SRC.CIK_MAP_PATH.write_text(json.dumps({
+            'fetched': (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+            'complete': True, 'index_first': True, 'current': False, 'index': {'IDX': 777},
+            'map': {**{f'T{i}': i for i in range(6000)}, 'BNY': 1137390, 'DOC': 1574540,
+                    'KO': 21344, 'GONE': 555, 'IDX': 777, 'OVR': 888}}))
+        SRC.CIK_OVERRIDE_PATH.write_text(json.dumps({'OVR': 999}))
+        SRC.fetch_submissions = lambda cik, cfg, force=False: {'tickers': records.get(cik, [])}
+        SRC._search_ticker = search
+        try:
+            want = ['BNY', 'DOC', 'KO', 'GONE', 'IDX', 'OVR', 'NEWCO', 'NOPE']
+            found, missing = SRC.resolve_ciks(want, verbose=False, cfg=CFG)
+            assert found == {'BNY': 1390777, 'DOC': 765880, 'KO': 21344, 'IDX': 777,
+                             'OVR': 999, 'NEWCO': 4242}, found
+            # GONE: only the frozen file named it. IDX: an index table did - kept.
+            assert missing == ['GONE', 'NOPE'], missing
+            assert sorted(asked) == ['BNY', 'DOC', 'GONE', 'IDX', 'NEWCO', 'NOPE'], asked
+            n = len(asked)
+            assert SRC.resolve_ciks(want, verbose=False, cfg=CFG) == (found, missing)
+            assert len(asked) == n, 'answers were not remembered'
+            SRC.resolve_ciks(['DOWN'], verbose=False, cfg=CFG)
+            SRC.resolve_ciks(['DOWN'], verbose=False, cfg=CFG)
+            assert asked.count('DOWN') == 2, 'a failed search was remembered as "no such ticker"'
+            # Without a configuration (the share-class refresh), nothing is checked.
+            assert SRC.resolve_ciks(['BNY'], verbose=False)[0] == {'BNY': 1137390}
+        finally:
+            (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC.CIK_SEARCH_PATH,
+             SRC.fetch_submissions, SRC._search_ticker) = old
+    print('  tickers: confirmed by the filer, else found by EDGAR\'s search, else left out')
+
+
+def test_edgar_search_and_secs_maintained_file_are_read_exactly():
+    """EDGAR's search for "BNY" ranks BNY Mellon's municipal funds beside the
+    bank; only a hit that lists the ticker itself is taken."""
+    from valuation import sources as SRC
+
+    class Reply:
+        def __init__(self, body, status=200):
+            self.body, self.status_code = body, status
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f'{self.status_code} Forbidden')
+
+        def json(self):
+            return self.body
+
+    hits = {'hits': {'hits': [
+        {'_id': '818972', '_source': {'entity': 'BNY MELLON STRATEGIC MUNICIPALS, INC. (LEO)',
+                                      'tickers': 'LEO'}},
+        {'_id': '2052410', '_source': {'entity': 'BNY HOLDINGS'}},
+        {'_id': '1390777', '_source': {'entity': 'Bank of New York Mellon Corp (BNY, BNY-PK)',
+                                       'tickers': 'BNY, BNY-PK'}}]}}
+    tickers_json = {'0': {'cik_str': 1390777, 'ticker': 'BNY', 'title': 'BNY'},
+                    '1': {'cik_str': 1067983, 'ticker': 'BRK.B', 'title': 'Berkshire'}}
+    old = SRC._sec_get
+    try:
+        SRC._sec_get = lambda url, timeout, pause=0.12: Reply(hits)
+        assert SRC._search_ticker('BNY') == (1390777, True)
+        assert SRC._search_ticker('BNY-PK') == (1390777, True)
+        assert SRC._search_ticker('BN') == (None, True)
+        SRC._sec_get = lambda url, timeout, pause=0.12: Reply(tickers_json)
+        assert SRC._sec_current_map(verbose=False) == {'BNY': 1390777, 'BRK-B': 1067983}
+        SRC._sec_get = lambda url, timeout, pause=0.12: Reply({}, 403)    # no contact
+        assert SRC._search_ticker('BNY') == (None, False)
+        assert SRC._sec_current_map(verbose=False) == {}
+    finally:
+        SRC._sec_get = old
+    print('  EDGAR search: an exact ticker only; a refusal is not "not found"')
 
 
 if __name__ == '__main__':
