@@ -5,6 +5,9 @@ name: Valuation tracker
 on:
   schedule:
     - cron: '30 22 * * 1-5'   # 22:30 UTC = 17:30 New York in winter, 18:30 in summer
+    # Catch-up: GitHub drops scheduled runs when it is busy. This one does
+    # nothing if the evening run already recorded the day's close.
+    - cron: '30 3 * * 2-6'
   workflow_dispatch:           # "Run workflow" button on the Actions tab
   push:                        # a code or watchlist change re-runs it
     branches: [main]
@@ -29,6 +32,8 @@ jobs:
     permissions:
       contents: write          # to push the history store to the data branch
       issues: write            # to post the run's changes, which notifies you
+    outputs:
+      skipped: ${{ steps.track.outputs.skipped }}
     steps:
       - uses: actions/checkout@v7
 
@@ -83,15 +88,22 @@ jobs:
         run: python tests/test_valuation.py
 
       - name: Run the tracker
+        id: track
         env:
           VALUATION_TRACKER: _data/valuation_tracker.xlsx
           VALUATION_USER_AGENT: ${{ secrets.VALUATION_USER_AGENT }}
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
           VALUATION_ALERTS: _alerts.md
-        run: python run_valuation.py
+          CATCH_UP: ${{ github.event.schedule == '30 3 * * 2-6' }}
+        run: |
+          if [ "$CATCH_UP" = "true" ]; then
+            python run_valuation.py --catch-up
+          else
+            python run_valuation.py
+          fi
 
       - name: Keep downloads for the next run
-        if: always()
+        if: always() && steps.track.outputs.skipped != 'true'
         uses: actions/cache/save@v6
         with:
           path: |
@@ -100,6 +112,7 @@ jobs:
           key: valuation-downloads-${{ github.run_id }}
 
       - name: Commit the history store
+        if: steps.track.outputs.skipped != 'true'
         working-directory: _data
         run: |
           git config user.name 'github-actions[bot]'
@@ -132,6 +145,7 @@ jobs:
           gh issue comment "$n" --body-file _alerts.md
 
       - name: Assemble the site
+        if: steps.track.outputs.skipped != 'true'
         run: |
           mkdir -p _site
           cp valuation_dashboard.html _site/index.html
@@ -139,11 +153,13 @@ jobs:
           if [ -d valuation_details ]; then cp -r valuation_details _site/; fi
 
       - uses: actions/upload-pages-artifact@v5
+        if: steps.track.outputs.skipped != 'true'
         with:
           path: _site
 
   deploy:
     needs: run
+    if: needs.run.outputs.skipped != 'true'
     runs-on: ubuntu-latest
     permissions:
       pages: write

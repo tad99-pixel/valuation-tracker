@@ -229,6 +229,81 @@ def test_unit_scale_repair_takes_a_vote_from_the_years_own_figures():
     print('  unit repair: a run of bad years fixed with net income / EPS; D&A against its parts')
 
 
+def test_a_split_shaped_jump_needs_a_split_to_cut_the_history():
+    """Cigna doubled its share count buying Express Scripts, and the jump was
+    read as a missed 2-for-1 split: ten years of per-share history discarded.
+    A split leaves a gap in the price record; a merger leaves a bigger
+    company, and a listing leaves no prices before it."""
+    idx = years(10, 2015)
+    shares = pd.Series([1e8] * 4 + [2e8] * 6, index=idx)
+    flat = pd.Series([10e9] * 10, index=idx)
+    days = pd.bdate_range('2014-06-01', '2025-12-31')
+    calm = pd.DataFrame({'Close': np.linspace(50, 80, len(days))}, index=days)
+
+    def run(revenue, prices, split_dates=()):
+        p = pd.DataFrame({'shares_used': shares, 'revenue': revenue})
+        info = dict(F._share_basis_diagnostic(p), split_dates=list(split_dates))
+        assert info['share_breaks'][0]['kind'] == 'split', info
+        return S._confirm_breaks(p, info, prices)
+
+    merger = run(flat * np.r_[[1.0] * 4, [2.2] * 6], calm)
+    assert merger['per_share_reliable'] and merger['share_events'], merger
+    gapped = calm.copy()
+    gapped.loc[gapped.index >= '2020-03-02', 'Close'] /= 2          # a 2-for-1 nobody recorded
+    assert not run(flat, gapped)['per_share_reliable']
+    assert not run(flat * np.r_[[1.0] * 4, [2.2] * 6], calm, ['2020-06-01'])['per_share_reliable']
+    listed = calm[calm.index >= '2019-03-01']
+    assert run(flat, listed)['per_share_reliable']
+    assert not run(flat, calm)['per_share_reliable'], 'a jump nothing explains still cuts'
+    print('  share basis: a split-shaped jump is a merger or a listing unless a split explains it')
+
+
+def test_a_run_is_dated_by_the_close_it_priced():
+    """Monday's cloud runs, made before the US open, priced Friday's close and
+    were filed under Monday; a catch-up run after midnight UTC would file
+    Monday's close under Tuesday. A run is now dated by its newest close, and
+    the catch-up schedule does nothing when that close is already recorded."""
+    latest = pd.DataFrame({'Ticker': ['A', 'B', 'C'],
+                           'PriceDate': pd.to_datetime(['2026-11-06', '2026-11-06', '2026-10-30'])})
+    assert T.run_date_of(latest) == pd.Timestamp('2026-11-06')
+    assert T.run_date_of(None) == pd.Timestamp.today().normalize()
+    store = {'Latest': latest}
+    assert T.close_recorded(store, pd.Timestamp('2026-11-06'))
+    assert not T.close_recorded(store, pd.Timestamp('2026-11-09'))
+    assert not T.close_recorded({}, pd.Timestamp('2026-11-09'))
+    print('  run dating: by the close a run priced; catch-up skips a recorded close')
+
+
+def test_revenue_is_the_total_not_its_largest_tagged_part():
+    """ASC 606 contract revenue leaves out leases, premiums and interest:
+    American Tower files $0.77bn of it beside $10.13bn of Revenues, and the
+    first tag in the chain used to win. Revenue including excise taxes never
+    displaces revenue excluding them; a bank's revenue includes its interest."""
+    tags = F.DURATION_CONCEPTS['revenue']
+    amt = facts_doc({
+        'RevenueFromContractWithCustomerExcludingAssessedTax': {'USD': [dur('2024-01-01', '2024-12-31', 0.77e9, '2025-02-25')]},
+        'Revenues': {'USD': [dur('2024-01-01', '2024-12-31', 10.13e9, '2025-02-25')]},
+        'OperatingLeaseLeaseIncome': {'USD': [dur('2024-01-01', '2024-12-31', 9.35e9, '2025-02-25')]}})
+    vals, used, _ = F._annual_duration_series(amt, tags, 'revenue')
+    assert vals.iloc[0] == 10.13e9 and used == ['Revenues'], (vals, used)
+    bf = facts_doc({
+        'RevenueFromContractWithCustomerExcludingAssessedTax': {'USD': [dur('2023-05-01', '2024-04-30', 4.18e9, '2024-06-13')]},
+        'RevenueFromContractWithCustomerIncludingAssessedTax': {'USD': [dur('2023-05-01', '2024-04-30', 5.31e9, '2024-06-13')]}})
+    vals, _, _ = F._annual_duration_series(bf, tags, 'revenue')
+    assert vals.iloc[0] == 4.18e9, vals
+    # A larger figure that is not twice the first is not evidence of a part:
+    # Hasbro tags $4.75bn as Revenues beside the $4.14bn it reports.
+    has = facts_doc({
+        'RevenueFromContractWithCustomerExcludingAssessedTax': {'USD': [dur('2024-01-01', '2024-12-29', 4.14e9, '2025-02-27')]},
+        'Revenues': {'USD': [dur('2024-01-01', '2024-12-29', 4.75e9, '2025-02-27')]}})
+    vals, _, _ = F._annual_duration_series(has, tags, 'revenue')
+    assert vals.iloc[0] == 4.14e9, vals
+    bank = pd.DataFrame({'revenue': [2.04e9], 'net_interest_income': [5.34e9],
+                         'noninterest_income': [2.04e9], 'net_income': [1.94e9]}, index=years(1, 2024))
+    assert F._derive_columns(bank)['revenue'].iloc[0] == 7.38e9
+    print('  revenue: the total, not ASC 606 contract revenue; net of excise; banks with interest')
+
+
 def test_a_zero_share_count_is_no_count():
     """Constellation Energy's carve-out years before its 2022 spin-off file
     zero shares and an EPS of 0.00 against $589m of income. Kept, the zero
@@ -1032,6 +1107,23 @@ def test_banks_get_two_value_models_and_15x_is_a_price_limit():
     print('  models: banks valued on justified P/B and earnings; 15x EPS a ceiling')
 
 
+def test_reits_and_utilities_get_a_second_value_model():
+    """None of 27 REITs or 37 utilities had a measurable margin: a REIT's EPV
+    is carved out, and a utility's net debt swamps its EPV. A REIT's FFO is
+    now also capitalised without growth, and a utility is valued like a bank -
+    its regulator sets its return on book equity."""
+    p, info, prices = synthetic_company()
+    reit = S.evaluate('REIT', p, dict(info, group='reit'), prices, MACRO, CFG)
+    used = set(reit['consensus']['models_used'])
+    assert used == {'dcf', 'earnings_value'}, reit['consensus']
+    ev, dcf = reit['models']['earnings_value'], reit['models']['dcf']
+    assert ev['label'].startswith('Average FFO') and 0 < ev['value'] < dcf['value'], (ev, dcf)
+    assert f"{dcf['detail']['rate']:.1%}" in ev['note'], ev['note']
+    util = S.evaluate('UTIL', p, dict(info, group='utility'), prices, MACRO, CFG)
+    assert {'justified_pb', 'earnings_value'} <= set(util['consensus']['models_used']), util['consensus']
+    print('  models: REITs add capitalised FFO; utilities valued on book and earnings')
+
+
 def test_one_dollar_window_matches_the_retained_years():
     p, info, prices = synthetic_company()
     change, note = S._market_value_change(prices, p, 10, None)
@@ -1149,7 +1241,46 @@ def test_alerts_list_only_companies_that_moved():
         assert '| B |' not in text and '| C |' not in text, text
         assert RV.write_alerts(ch.iloc[1:], Path(d) / 'none.md') == 0
         assert not (Path(d) / 'none.md').exists()
+        # Beyond the names chosen by hand, only a verdict entering or leaving
+        # the priced-below-value group is news.
+        idx = pd.DataFrame([
+            {'date': day, 'Ticker': 'W', 'change': 'margin band', 'before': 'THIN',
+             'after': 'PREMIUM', 'detail': ''},
+            {'date': day, 'Ticker': 'X', 'change': 'margin band', 'before': 'THIN',
+             'after': 'PREMIUM', 'detail': ''},
+            {'date': day, 'Ticker': 'Y', 'change': 'verdict', 'before': 'GOOD BUSINESS, DEAR',
+             'after': 'CANDIDATE', 'detail': ''},
+            {'date': day, 'Ticker': 'Z', 'change': 'verdict', 'before': 'NO',
+             'after': 'GOOD BUSINESS, DEAR', 'detail': ''}])
+        assert RV.write_alerts(idx, f, focus=['W']) == 2
+        text = f.read_text(encoding='utf-8')
+        assert '| W |' in text and '| Y |' in text and '| X |' not in text and '| Z |' not in text
     print('  alerts: companies that moved, not new ones or rule changes')
+
+
+def test_crossings_and_bands_must_clear_a_buffer():
+    """Nike sat at 1.003x its estimate: a cent either way flips it between
+    *fair price* and *dear*. A move counts only once it clears 2% - measured
+    from the state last reported, so a drift back inside is not news and the
+    next real move is still caught."""
+    day = pd.Timestamp('2026-11-10')
+
+    def state(price, margin, band, verdict):
+        return pd.DataFrame([{'Ticker': 'N', 'Price': price, 'IntrinsicValue': 100.0,
+                              'MarginOfSafety': margin, 'MoSBand': band, 'Verdict': verdict,
+                              'ConfigVersion': 'r8'}])
+    dear = state(100.3, -0.003, 'PREMIUM', 'GOOD BUSINESS, DEAR')
+    T.detect_changes(None, dear, day)
+    wobble = state(99.5, 0.005, 'THIN', 'GOOD BUSINESS, FAIR PRICE')
+    assert T.detect_changes(dear, wobble, day).empty, 'a 0.5% wobble was reported'
+    assert wobble['_ref_verdict'].iloc[0] == 'GOOD BUSINESS, DEAR'
+    clear = state(96.0, 0.04, 'THIN', 'GOOD BUSINESS, FAIR PRICE')
+    ch = T.detect_changes(wobble, clear, day)
+    assert set(ch['change']) == {'verdict', 'margin band', 'below intrinsic value'}, ch
+    assert ch.set_index('change').loc['verdict', 'before'] == 'GOOD BUSINESS, DEAR'
+    back = state(99.0, 0.01, 'THIN', 'GOOD BUSINESS, FAIR PRICE')
+    assert T.detect_changes(clear, back, day).empty
+    print('  changes: a crossing or band move must clear 2% from the last reported state')
 
 
 def test_reverse_dcf_reports_its_discount_rate_range():

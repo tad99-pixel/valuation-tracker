@@ -34,7 +34,7 @@ LOG_PATH = ROOT / 'valuation_daily.log'
 # Stamped on every stored valuation. Bump whenever a threshold or a model
 # changes, so a tracker history is never silently pooled across two different
 # definitions of "margin of safety".
-CONFIG_VERSION = '2026-11-09-r7'
+CONFIG_VERSION = '2026-11-10-r8'
 
 for _d in (CACHE_DIR, FUND_DIR, FACTS_DIR, MACRO_DIR, STATE_DIR, REPORT_DIR):
     _d.mkdir(parents=True, exist_ok=True)
@@ -351,9 +351,13 @@ NA_CRITERIA_BY_GROUP = {
     'utility': {'min_revenue', 'gross_margin'},
 }
 
-# Groups valued on justified P/B, where owner earnings cannot be separated
-# from the balance sheet.
-BOOK_VALUED_GROUPS = ('bank', 'insurance', 'financial')
+# Groups valued on justified P/B and capitalised earnings, at the required
+# return without a leverage adjustment: financials, whose owner earnings cannot
+# be separated from the balance sheet, and utilities, whose regulators set
+# their return as a return on book equity. A utility's DCF and EPV still count
+# where they compute; before utilities joined, none of 37 had a measurable
+# margin - most had one model, or none, once net debt swamped their EPV.
+BOOK_VALUED_GROUPS = ('bank', 'insurance', 'financial', 'utility')
 
 # Companies that moved to a new SEC registration - a reorganisation into a new
 # holding company, a change of state - file their history under the old CIK

@@ -55,6 +55,8 @@ ANNUAL_FORMS = ('10-K', '10-K/A', '20-F', '20-F/A', '40-F', '10-KT')
 # RevenueFromContractWithCustomer*, an older filing uses SalesRevenueNet, and
 # a screen that only knows one of them silently reads zero revenue.
 DURATION_CONCEPTS = {
+    # Read as the largest figure filed for the year (see LARGEST_OF), so the
+    # parts below the totals only matter where no total was filed.
     'revenue': [
         'RevenueFromContractWithCustomerExcludingAssessedTax',
         'RevenueFromContractWithCustomerIncludingAssessedTax',
@@ -62,7 +64,14 @@ DURATION_CONCEPTS = {
         'SalesRevenueNet',
         'SalesRevenueGoodsNet',
         'RevenuesNetOfInterestExpense',          # banks
+        'OperatingLeaseLeaseIncome',             # lessors: REITs, towers, rental fleets
+        'LeaseIncome',
+        'PremiumsEarnedNet',                     # insurers
     ],
+    # A bank's revenue is mostly interest, which many banks tag only as these
+    # two lines (see `_derive_columns`).
+    'net_interest_income': ['InterestIncomeExpenseNet'],
+    'noninterest_income': ['NoninterestIncome'],
     'cost_of_revenue': [
         'CostOfRevenue', 'CostOfGoodsAndServicesSold', 'CostOfGoodsSold',
         'CostOfServices',
@@ -284,6 +293,22 @@ def _pick_latest(rows: list, key_fn) -> dict:
     return best
 
 
+# Concepts where the first figure in the chain gives way to another filed for
+# the same year that is at least `COMPONENT_RATIO` times larger - the sign the
+# first is only a component. ASC 606 "revenue from contracts with customers"
+# leaves out lease income, insurance premiums and interest, so for a lessor,
+# an insurer or a bank it is a fraction of revenue: American Tower's $0.8bn of
+# $10.1bn, Charter's $0.9bn of $55bn (an operating margin of 1,452%), Humana's
+# $5.8bn of $130bn. Simply taking the largest figure went wrong the other way:
+# Hasbro and Republic Services tag a total before eliminations as Revenues,
+# 15% above the revenue they report. Revenue including excise taxes never
+# displaces revenue excluding them (Brown-Forman: $5.3bn gross, $4.2bn net).
+LARGEST_OF = {'revenue'}
+COMPONENT_RATIO = 2.0
+_NET_OF_TAX = {'RevenueFromContractWithCustomerIncludingAssessedTax':
+               'RevenueFromContractWithCustomerExcludingAssessedTax'}
+
+
 def _annual_duration_series(facts: dict, tags: list, concept: str):
     """Annual values for a duration concept, indexed by period end date.
 
@@ -295,6 +320,8 @@ def _annual_duration_series(facts: dict, tags: list, concept: str):
     gaap = facts.get('facts', {}).get('us-gaap', {})
     units_wanted = _units_for(concept)
     collected: dict = {}
+    largest: dict = {}          # LARGEST_OF concepts: the biggest figure per period
+    tags_by_end: dict = {}
 
     for tag in tags:
         node = gaap.get(tag)
@@ -334,8 +361,23 @@ def _annual_duration_series(facts: dict, tags: list, concept: str):
             best = _pick_latest(annual, lambda r: r['end'])
             for e, r in best.items():
                 # Trap 3: key on the period's own end date.
-                if e not in collected and r.get('val') is not None:
-                    collected[e] = (float(r['val']), tag, r.get('filed'))
+                if r.get('val') is None:
+                    continue
+                val = float(r['val'])
+                if e not in collected:
+                    collected[e] = (val, tag, r.get('filed'))
+                if concept in LARGEST_OF:
+                    seen = tags_by_end.setdefault(e, set())
+                    seen.add(tag)
+                    if _NET_OF_TAX.get(tag) in seen:
+                        continue
+                    if e not in largest or val > largest[e][0]:
+                        largest[e] = (val, tag, r.get('filed'))
+
+    for e, big in largest.items():
+        first = collected.get(e)
+        if first is not None and first[0] > 0 and big[0] >= COMPONENT_RATIO * first[0]:
+            collected[e] = big
 
     if not collected:
         return None
@@ -707,6 +749,10 @@ def build_panel(ticker: str, facts: dict, meta: dict,
         # ever verified - distinct from an empty Series, "never split".
         # `score` withholds every price comparison when it is False.
         'splits_known': splits is not None,
+        # For `score`, which asks whether a split-shaped jump in the share
+        # count had a split on record near it.
+        'split_dates': ([pd.Timestamp(d).strftime('%Y-%m-%d') for d in splits.index]
+                        if splits is not None and len(splits) else []),
         'error': None,
     }
     info.update(_share_basis_diagnostic(panel))
@@ -832,7 +878,7 @@ def _share_basis_diagnostic(panel: pd.DataFrame) -> dict:
         if split_like is None and (abs(x / 1.5 - 1) <= 0.012 or abs(x * 1.5 - 1) <= 0.012):
             split_like = 1.5 if x > 1 else 1 / 1.5
         if split_like is not None:
-            breaks.append((d, (
+            breaks.append((d, 'split', split_like, x, (
                 f'share count moved {x:.2f}x in {d.year} - the signature of a '
                 f'{split_like if split_like > 1 else 1 / split_like:g}-for-1 '
                 f'{"split" if split_like > 1 else "reverse split"} that the split '
@@ -841,16 +887,21 @@ def _share_basis_diagnostic(panel: pd.DataFrame) -> dict:
             # No merger moves a share count twentyfold in a year. This is a
             # scale error the repair could not place with confidence, and it
             # must not be reported as a corporate event.
-            breaks.append((d, (
+            breaks.append((d, 'scale', None, x, (
                 f'share count moved {x:,.3g}x in {d.year} - a filing scale error '
                 'that could not be repaired; per-share history not comparable')))
         elif x > 1.4 or x < 0.7:
             out['share_events'].append(f'{d.year}: share count {x:.2f}x '
                                        '(merger, conversion or large issuance)')
+    # Every break, for `score`: a split-shaped one can still turn out to be a
+    # merger or a listing once the price record is in hand.
+    out['share_breaks'] = [{'date': d.strftime('%Y-%m-%d'), 'kind': kind, 'target': target,
+                            'ratio': float(x), 'note': note}
+                           for d, kind, target, x, note in breaks]
     if breaks:
         out['per_share_reliable'] = False
         out['share_basis_break'] = breaks[-1][0]       # the current basis starts here
-        out['share_basis_note'] = breaks[-1][1] + (
+        out['share_basis_note'] = breaks[-1][-1] + (
             f' ({len(breaks)} breaks; history kept from the last)' if len(breaks) > 1 else '')
     return out
 
@@ -945,6 +996,16 @@ def _derive_columns(panel: pd.DataFrame) -> pd.DataFrame:
 
     def col(name):
         return p[name] if name in p.columns else pd.Series(np.nan, index=p.index)
+
+    # A bank's revenue is net interest income plus fees. Many banks tag no
+    # revenue total, and their one revenue tag holds the fees alone:
+    # Huntington's $2.0bn, beside $5.3bn of net interest income.
+    # Held to the same standard as any other revenue figure: it takes over only
+    # where the filed one is missing or less than half of it.
+    banking = col('net_interest_income') + col('noninterest_income')
+    filed = col('revenue')
+    p['revenue'] = filed.where(~(banking >= COMPONENT_RATIO * filed) & filed.notna(),
+                               banking.where(banking > 0))
 
     # Gross profit, when only cost of revenue was filed.
     if 'gross_profit' not in p.columns or p['gross_profit'].isna().all():
@@ -1256,9 +1317,11 @@ def collect_built(built: dict, verbose: bool = True) -> tuple:
                 print(f'  carve-outs by filer SIC: {nonop}')
             bad = [t for t, i in infos.items() if not i.get('per_share_reliable', True)]
             if bad:
-                print(f'  per-share history unreliable for {len(bad)}: '
+                print(f'  breaks in the share count for {len(bad)}: '
                       f'{", ".join(bad[:6])}'
-                      + (' ...' if len(bad) > 6 else ''))
+                      + (' ...' if len(bad) > 6 else '')
+                      + ' (split-shaped ones are checked against the prices before any '
+                        'history is cut)')
         if errors:
             print(f'  {len(errors)} panel failure(s): {"; ".join(errors[:5])}'
                   + (' ...' if len(errors) > 5 else ''))

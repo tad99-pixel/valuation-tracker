@@ -107,16 +107,31 @@ def universe_tickers(name: str) -> list:
     return sources.index_constituents(name)
 
 
-def write_alerts(changes: pd.DataFrame | None, path: Path) -> int:
+# Verdicts that put the price at or below the estimate: for a company tracked
+# only because it is in an index, entering or leaving one of these is the news.
+PRICED_BELOW_VALUE = ('CANDIDATE', 'CHEAP, QUALITY PASSES', 'GOOD BUSINESS, FAIR PRICE',
+                      'STATISTICALLY CHEAP ONLY')
+
+
+def write_alerts(changes: pd.DataFrame | None, path: Path, focus=None) -> int:
     """The run's changes that are news, as markdown for the workflow to post.
 
     News means a company moved: not a first evaluation, and not a change of
-    rules. Returns how many were written; writes nothing when there are none.
+    rules. With `focus` - the names chosen by hand - every change to those is
+    news, and for the rest of an index only a verdict entering or leaving
+    `PRICED_BELOW_VALUE`: five hundred companies' band changes and crossings
+    would bury the forty-nine. Returns how many were written; writes nothing
+    when there are none.
     """
     if changes is None or changes.empty:
         return 0
     real = changes[(changes['change'] != 'new')
                    & ~changes['change'].str.contains('(rules', regex=False)]
+    if focus is not None and not real.empty:
+        mine = real['Ticker'].isin(set(focus))
+        found = ((real['change'] == 'verdict')
+                 & (real['before'].isin(PRICED_BELOW_VALUE) | real['after'].isin(PRICED_BELOW_VALUE)))
+        real = real[mine | found]
     if real.empty:
         return 0
 
@@ -144,6 +159,8 @@ def main(argv=None) -> int:
     ap.add_argument('--no-tracker', action='store_true', help='do not write the workbook')
     ap.add_argument('--no-dashboard', action='store_true', help='do not write the HTML')
     ap.add_argument('--open', action='store_true', help='open the dashboard when done')
+    ap.add_argument('--catch-up', action='store_true',
+                    help='do nothing if the history already holds the latest US close')
     ap.add_argument('--quiet', action='store_true')
     args = ap.parse_args(argv)
 
@@ -181,6 +198,18 @@ def main(argv=None) -> int:
             log.error(str(exc))
             return 3
     previous_latest = store.get('Latest')
+
+    # The catch-up schedule exists because GitHub drops scheduled runs under
+    # load; when the evening run did happen, it has nothing to add.
+    if args.catch_up:
+        close = sources._last_close_date()
+        if tracker.close_recorded(store, close):
+            log.info(f'catch-up: the {close:%Y-%m-%d} close is already recorded; nothing to do')
+            if os.environ.get('GITHUB_OUTPUT'):
+                with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+                    fh.write('skipped=true\n')
+            return 0
+        log.info(f'catch-up: the {close:%Y-%m-%d} close is not recorded yet; running')
 
     log.info('[1/5] macro')
     macro = sources.get_macro(cfg, verbose=verbose)
@@ -253,7 +282,11 @@ def main(argv=None) -> int:
                              f'{c["before"]} -> {c["after"]}')
         # On GitHub the workflow posts these to an issue, which notifies you.
         if os.environ.get('VALUATION_ALERTS'):
-            n = write_alerts(changes, Path(os.environ['VALUATION_ALERTS']))
+            # The names chosen by hand, as opposed to those an index brought in.
+            indexes = set(sources.INDEX_NAMES.values())
+            focus = [t for t, names in lists.items() if any(n not in indexes for n in names)]
+            n = write_alerts(changes, Path(os.environ['VALUATION_ALERTS']),
+                             focus=focus if len(focus) < len(lists) else None)
             if n:
                 log.info(f'  {n} change(s) written for the alert')
 

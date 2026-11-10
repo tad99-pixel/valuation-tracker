@@ -283,7 +283,7 @@ def required_returns(panel: pd.DataFrame, info: dict, price, macro: dict,
     debt, shares = _last(panel, 'total_debt'), info.get('shares_outstanding_now')
     if info.get('group') in BOOK_VALUED_GROUPS:
         return dict(out, note=f'{r:.1%} required return; no leverage adjustment for a '
-                              'balance-sheet business')
+                              'business whose returns are set on its book')
     if not price or not shares or debt is None or debt <= 0:
         why = 'no debt' if debt is not None and debt <= 0 else 'leverage unknown'
         return dict(out, note=f'{r:.1%} required return ({why})')
@@ -404,11 +404,13 @@ def justified_pb_value(panel: pd.DataFrame, summary: dict, info: dict,
     described judging banks - returns on equity, earned without excess
     leverage, against the price of the book. Uses the *median* ten-year ROE,
     so one exceptional year cannot set the multiple, and grows only at the
-    terminal rate.
+    terminal rate. It fits a regulated utility as well: its regulator sets
+    its return as a return on book equity.
     """
     b = cfg.buffett
     if info.get('group', 'operating') not in BOOK_VALUED_GROUPS:
-        return None, {'note': 'used for financial companies only; DCF and EPV cover the rest'}
+        return None, {'note': 'used for financial companies and utilities; DCF and EPV '
+                              'cover the rest'}
     if G._basis(info):
         return None, {'note': G._basis(info)}
     roe, bvps = summary.get('roe_median'), _last(panel, 'bvps')
@@ -573,7 +575,7 @@ def epv_value(panel: pd.DataFrame, summary: dict, info: dict,
 
 
 def earnings_value(summary: dict, info: dict, rates: dict):
-    """A bank's or insurer's average earnings, capitalised at the required return.
+    """Average earnings capitalised at the required return, crediting no growth.
 
     The book-valued groups have no owner earnings or EPV - their cash flows
     are not separable from the balance sheet - which left justified P/B as
@@ -582,9 +584,16 @@ def earnings_value(summary: dict, info: dict, rates: dict):
     return, with no growth credited, is the earning-power view of a bank.
     Graham's "15 x EPS" is not this - it is criterion 6's price ceiling, an
     earnings yield of 6.7% whatever the required return.
+
+    A REIT's EPV is carved out (its GAAP earnings are depreciation-distorted),
+    which left its DCF alone, and none of 27 had a measurable margin. Its
+    no-growth counterpart is the DCF's own base - funds from operations, the
+    five-year mean - capitalised at the same equity rate.
     """
+    if info.get('group') == 'reit':
+        return _ffo_value(summary, info, rates)
     if info.get('group') not in BOOK_VALUED_GROUPS:
-        return None, {'note': 'used for banks, insurers and other financials; EPV covers the rest'}
+        return None, {'note': 'used for financials, utilities and REITs; EPV covers the rest'}
     if G._basis(info):
         return None, {'note': G._basis(info)}
     eps3 = summary.get('eps_avg3')
@@ -595,6 +604,20 @@ def earnings_value(summary: dict, info: dict, rates: dict):
     r = rates['equity']
     return eps3 / r, {'note': f'3-year average EPS {eps3:,.2f} / required return {r:.1%}; '
                               'no growth credited'}
+
+
+def _ffo_value(summary: dict, info: dict, rates: dict):
+    """A REIT's funds from operations, capitalised at its equity rate."""
+    base, basis, why = _cash_flow_base(summary, info)
+    if base is None:
+        return None, {'note': why}
+    shares, why = _valuation_shares(info)
+    if not shares:
+        return None, {'note': why}
+    r = rates['equity']
+    return base / r / shares, {'note': (f'{basis.replace("owner earnings", "FFO")} '
+                                        f'${base / 1e9:,.2f}bn capitalised at {r:.1%}, the '
+                                        'equity rate the DCF uses; no growth credited')}
 
 
 def earnings_multiple_value(summary: dict, cfg: ValuationConfig, info: dict):
@@ -655,6 +678,9 @@ def intrinsic_values(panel: pd.DataFrame, info: dict, summary: dict,
                *justified_pb_value(panel, summary, info, cfg), 'derived')
         record('earnings_value', 'Average earnings at the required return (no growth)',
                *earnings_value(summary, info, rates), 'derived')
+    elif info.get('group') == 'reit':
+        record('earnings_value', 'Average FFO at the required return (no growth)',
+               *earnings_value(summary, info, rates), 'derived')
     record('growth_formula', 'Graham growth formula',
            *G.growth_formula_value(summary, macro, cfg, info), 'graham-disavowed')
 
@@ -691,8 +717,9 @@ def intrinsic_values(panel: pd.DataFrame, info: dict, summary: dict,
 
 # Models that estimate what the business is worth, by capitalising what it
 # earns at the required return. These, and only these, go into the consensus.
-# `justified_pb` and `earnings_value` only ever produce a value for financial
-# companies, where the first two cannot.
+# `justified_pb` and `earnings_value` only ever produce a value for financials
+# and utilities (and `earnings_value`, on FFO, for REITs), where the first two
+# cannot or do not alone.
 VALUE_MODELS = ('dcf', 'epv', 'justified_pb', 'earnings_value')
 
 # Prices at which Graham's rules would be satisfied. These are *not* estimates

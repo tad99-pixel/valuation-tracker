@@ -95,6 +95,86 @@ def _market_value_change(prices: pd.DataFrame | None, panel: pd.DataFrame,
     return p1 * float(s1) - p0 * float(s0), f'{start:%Y-%m} to {end:%Y-%m}: {p0:,.2f} -> {p1:,.2f}'
 
 
+def _confirm_breaks(panel: pd.DataFrame, info: dict, prices: pd.DataFrame | None) -> dict:
+    """Keep a split-shaped break in the share count only if a split explains it.
+
+    `fundamentals._share_basis_diagnostic` reads a year-on-year move of almost
+    exactly a split ratio as a split the split history missed, and the
+    per-share history before it is discarded. Across the S&P 500 nearly all
+    such breaks were mergers or listings - Cigna and Express Scripts, United
+    and Continental, Keurig and Dr Pepper, the IPOs of Datadog and Moderna -
+    and each cost the company its ten-year per-share tests. The evidence
+    tells them apart:
+
+    - a split on record near the break, or a one-day gap of the split ratio in
+      the price record, is a split: the break stands. A missed split shows in
+      the filings up to three years before it, as restated comparatives give
+      way to older reports, so the search runs that far ahead;
+    - prices that begin in or soon after the break year mean a listing, and
+      revenue that grew with a rising share count means a merger: the history
+      is kept, with the move reported as an event;
+    - anything else stands, as before.
+    """
+    breaks = info.get('share_breaks') or []
+    if not any(b.get('kind') == 'split' for b in breaks):
+        return info
+    close = (prices['Close'].dropna() if prices is not None and not prices.empty
+             and 'Close' in prices else pd.Series(dtype=float))
+    first_price = close.index[0] if len(close) else None
+    # The price download reaches back twelve years; a record that starts
+    # inside that window starts at a listing.
+    listed_late = (first_price is not None
+                   and first_price > pd.Timestamp.today() - pd.DateOffset(years=12) + pd.Timedelta(days=45))
+    splits = pd.to_datetime(info.get('split_dates') or [])
+    rev = panel['revenue'] if 'revenue' in panel.columns else pd.Series(np.nan, index=panel.index)
+    kept, events = [], list(info.get('share_events') or [])
+    for b in breaks:
+        if b.get('kind') != 'split':
+            kept.append(b)
+            continue
+        end = pd.Timestamp(b['date'])
+        pos = panel.index.get_indexer([end])[0]
+        if pos < 1:
+            kept.append(b)
+            continue
+        start = panel.index[pos - 1]
+        horizon = end + pd.DateOffset(years=3, months=3)
+
+        def event(why):
+            events.append(f"{end.year}: share count {b['ratio']:.2f}x - split-shaped, but "
+                          f'no split is recorded and the prices show none ({why})')
+
+        # A listing that year explains the move before any later price can:
+        # Coinbase's 26% fall in May 2022 once passed for its 3-for-2 "split".
+        if listed_late and start <= first_price <= end + pd.DateOffset(months=15):
+            event('listed that year')
+            continue
+        if any(start - pd.DateOffset(years=1) <= s <= horizon for s in splits):
+            kept.append(b)
+            continue
+        window = close[(close.index > start) & (close.index <= horizon)]
+        if len(window) > 1:
+            moves = (window / window.shift(1)).dropna()
+            if ((moves * b['target'] - 1).abs() <= 0.07).any():
+                kept.append(b)
+                continue
+        before, after = rev.iloc[pos - 1], rev.iloc[min(pos + 1, len(rev) - 1)]
+        if (b['ratio'] > 1 and pd.notna(before) and before > 0 and pd.notna(after)
+                and after / before >= 1.3):
+            event(f'revenue grew {after / before:.2f}x alongside it')
+        else:
+            kept.append(b)
+    if len(kept) == len(breaks):
+        return info
+    out = dict(info, share_events=events)
+    if kept:
+        out.update(per_share_reliable=False, share_basis_break=pd.Timestamp(kept[-1]['date']),
+                   share_basis_note=kept[-1]['note'])
+    else:
+        out.update(per_share_reliable=True, share_basis_break=None, share_basis_note=None)
+    return out
+
+
 def _truncate_at_break(panel: pd.DataFrame, info: dict) -> tuple:
     """Keep per-share history only from the last uncorrectable basis break on.
 
@@ -219,6 +299,7 @@ def evaluate(ticker: str, panel: pd.DataFrame, info: dict,
             price_date = close.index[-1]
             stale_days = int((pd.Timestamp.today().normalize() - price_date).days)
 
+    info = _confirm_breaks(panel, info, prices)
     panel, truncation = _truncate_at_break(panel, info)
     basis_problem = _check_price_basis(price, panel, info)
     per_share_problem = _per_share_basis(price, panel, info)

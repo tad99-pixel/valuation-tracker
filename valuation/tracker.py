@@ -43,7 +43,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import CONFIG_VERSION, PROVENANCE, SOURCE_TIERS, TRACKER_PATH
+from .config import CONFIG_VERSION, PROVENANCE, SOURCE_TIERS, TRACKER_PATH, ScoreConfig
 
 SHEET_ORDER = ['RunLog', 'Latest', 'Changes', 'History', 'Criteria', 'Models',
                'Provenance']
@@ -269,6 +269,39 @@ def provenance_frame() -> pd.DataFrame:
     ])
 
 
+# How far past a threshold a move must go to be reported. Across the S&P 500
+# about twenty companies sit within 2% of their estimate, their Graham Number or
+# a margin band's edge on any day, and ordinary price moves would report them
+# crossing back and forth. Each row of `Latest` carries the state last reported
+# (the `_ref_*` columns), and a move is measured from there: one that falls
+# back inside the buffer is not news, and the next real one is still caught.
+CROSSING_BUFFER = 0.02          # of the threshold's own value
+BAND_BUFFER = 0.02              # of margin of safety, in points
+_BANDS = ('PREMIUM', 'THIN', 'ADEQUATE', 'STRONG')
+_CROSSINGS = (('IntrinsicValue', 'intrinsic value'), ('GrahamNumber', 'Graham Number'),
+              ('GrahamBargainPrice', '2/3 NCAV'))
+
+
+def _band_of(margin: float) -> str:
+    s = ScoreConfig()
+    if margin >= s.mos_strong:
+        return 'STRONG'
+    if margin >= s.mos_adequate:
+        return 'ADEQUATE'
+    return 'THIN' if margin >= 0 else 'PREMIUM'
+
+
+def _band_move_is_clear(ref, now, margin) -> bool:
+    """Has the margin left the reported band by more than the buffer?
+
+    A move to or from "withheld" has no margin to measure and always counts.
+    """
+    if ref not in _BANDS or now not in _BANDS or margin is None:
+        return True
+    up = _BANDS.index(now) > _BANDS.index(ref)
+    return _band_of(margin - BAND_BUFFER if up else margin + BAND_BUFFER) != ref
+
+
 def detect_changes(previous: pd.DataFrame | None, latest: pd.DataFrame,
                    run_date) -> pd.DataFrame:
     """What moved since the last run - the reason to keep a tracker at all.
@@ -289,13 +322,20 @@ def detect_changes(previous: pd.DataFrame | None, latest: pd.DataFrame,
     A change of rules is not news about a company. When the two runs used
     different `CONFIG_VERSION`s, the changes are still recorded - a reader
     should see them - but each is labelled with the rule change, so a verdict
-    moved by a new threshold is never read as the company having moved.
+    moved by a new threshold is never read as the company having moved. A
+    rule change also resets the reported state, without the buffers.
+
+    Changes are measured from the state last reported, not from yesterday's,
+    and must clear `CROSSING_BUFFER` or `BAND_BUFFER` (see above). A verdict
+    change that comes with a margin band move inside the buffer waits with it.
+    The reported state is written back onto `latest` as `_ref_*` columns.
     """
     rows = []
     if latest is None or latest.empty:
         return pd.DataFrame()
     prev = (previous.set_index('Ticker') if previous is not None
             and not previous.empty and 'Ticker' in previous.columns else None)
+    refs: dict = {}
 
     def add(t, change, before, after, detail):
         rows.append({'date': run_date, 'Ticker': t, 'change': change,
@@ -312,44 +352,81 @@ def detect_changes(previous: pd.DataFrame | None, latest: pd.DataFrame,
     def text(x):
         return None if x is None or (isinstance(x, float) and np.isnan(x)) else str(x)
 
+    def below(px, v):
+        return None if px is None or v is None else px < v
+
+    def current(row):
+        px = num(row.get('Price'))
+        state = {'verdict': text(row.get('Verdict')), 'band': text(row.get('MoSBand'))}
+        state.update({col: below(px, num(row.get(col))) for col, _ in _CROSSINGS})
+        return state
+
     for row in latest.to_dict('records'):
         t = row['Ticker']
         if prev is None or t not in prev.index:
             add(t, 'new', None, row.get('Verdict'), 'first evaluation')
+            refs[t] = current(row)
             continue
         p = prev.loc[t]
         if isinstance(p, pd.DataFrame):
             p = p.iloc[-1]
         c0, c1 = text(p.get('ConfigVersion')), text(row.get('ConfigVersion'))
         tag = f' (rules {c0} -> {c1})' if c0 and c1 and c0 != c1 else ''
+        now = current(row)
+        state = dict(now)
 
-        if text(p.get('Verdict')) != text(row.get('Verdict')):
-            add(t, 'verdict' + tag, p.get('Verdict'), row.get('Verdict'),
-                f'composite {num(p.get("Composite")) or 0:.2f} -> '
-                f'{num(row.get("Composite")) or 0:.2f}')
+        # The reported state; a row from before it was kept stands in for it.
+        ref_verdict = text(p.get('_ref_verdict')) or text(p.get('Verdict'))
+        ref_band = text(p.get('_ref_band'))
+        ref_band = text(p.get('MoSBand')) if ref_band is None else (
+            None if ref_band == 'withheld' else ref_band)
+        band_clear = bool(tag) or _band_move_is_clear(
+            ref_band, now['band'], num(row.get('MarginOfSafety')))
 
-        b0, b1 = text(p.get('MoSBand')), text(row.get('MoSBand'))
-        if b0 != b1:
-            add(t, 'margin band' + tag, b0 or 'withheld', b1 or 'withheld',
-                str(row.get('MoSVerdict')))
+        if now['verdict'] != ref_verdict:
+            if now['band'] == ref_band or band_clear:
+                add(t, 'verdict' + tag, ref_verdict, now['verdict'],
+                    f'composite {num(p.get("Composite")) or 0:.2f} -> '
+                    f'{num(row.get("Composite")) or 0:.2f}')
+            else:
+                state['verdict'] = ref_verdict
+        if now['band'] != ref_band:
+            if band_clear:
+                add(t, 'margin band' + tag, ref_band or 'withheld', now['band'] or 'withheld',
+                    str(row.get('MoSVerdict')))
+            else:
+                state['band'] = ref_band
 
         px0, px1 = num(p.get('Price')), num(row.get('Price'))
-        for col, label in (('IntrinsicValue', 'intrinsic value'),
-                           ('GrahamNumber', 'Graham Number'),
-                           ('GrahamBargainPrice', '2/3 NCAV')):
+        for col, label in _CROSSINGS:
             v0, v1 = num(p.get(col)), num(row.get(col))
-            if None in (px0, px1, v0, v1):
+            if v1 is None or px1 is None:
                 if v0 is not None and v1 is None:
                     add(t, f'{label} lost{tag}', f'{v0:,.2f}', None,
                         'not computable under the new rules' if tag
                         else 'no longer computable from the latest filings')
                 continue
-            if px0 >= v0 and px1 < v1:
-                add(t, f'below {label}{tag}', f'{px0:,.2f} vs {v0:,.2f}',
-                    f'{px1:,.2f} vs {v1:,.2f}', f'price crossed below {label}')
-            elif px0 < v0 and px1 >= v1:
-                add(t, f'above {label}{tag}', f'{px0:,.2f} vs {v0:,.2f}',
-                    f'{px1:,.2f} vs {v1:,.2f}', f'price crossed back above {label}')
+            held = num(p.get(f'_ref_below_{col}'))
+            ref_below = bool(held) if held is not None else below(px0, v0)
+            if ref_below is None or now[col] == ref_below:
+                continue
+            clear = bool(tag) or (px1 <= v1 * (1 - CROSSING_BUFFER) if now[col]
+                                  else px1 >= v1 * (1 + CROSSING_BUFFER))
+            if not clear:
+                state[col] = ref_below
+            elif now[col]:
+                add(t, f'below {label}{tag}', f'{px0:,.2f} vs {v0:,.2f}' if None not in (px0, v0)
+                    else None, f'{px1:,.2f} vs {v1:,.2f}', f'price crossed below {label}')
+            else:
+                add(t, f'above {label}{tag}', f'{px0:,.2f} vs {v0:,.2f}' if None not in (px0, v0)
+                    else None, f'{px1:,.2f} vs {v1:,.2f}', f'price crossed back above {label}')
+        refs[t] = state
+
+    latest['_ref_verdict'] = latest['Ticker'].map(lambda t: refs[t]['verdict'])
+    latest['_ref_band'] = latest['Ticker'].map(lambda t: refs[t]['band'] or 'withheld')
+    for col, _ in _CROSSINGS:
+        latest[f'_ref_below_{col}'] = latest['Ticker'].map(
+            lambda t, c=col: np.nan if refs[t][c] is None else float(refs[t][c]))
     return pd.DataFrame(rows)
 
 
@@ -375,10 +452,35 @@ def run_log_row(run_id, run_date, latest: pd.DataFrame, macro: dict,
     return pd.DataFrame([row])
 
 
+def run_date_of(latest: pd.DataFrame | None) -> pd.Timestamp:
+    """The trading day a run describes: the newest close it priced.
+
+    Runs were dated by the machine's calendar, so a run made after midnight
+    UTC - the catch-up schedule, or any run from Singapore the next morning -
+    filed Monday's closes under Tuesday, and Monday's cloud runs, made before
+    the US open, filed Friday's under Monday. Dated by its prices, a later
+    run for the same close replaces the earlier one's rows.
+    """
+    if latest is not None and 'PriceDate' in latest.columns:
+        d = pd.to_datetime(latest['PriceDate'], errors='coerce').max()
+        if pd.notna(d):
+            return pd.Timestamp(d).normalize()
+    return pd.Timestamp.today().normalize()
+
+
+def close_recorded(store: dict | None, close) -> bool:
+    """Whether the newest run in the store already priced `close`."""
+    latest = (store or {}).get('Latest')
+    if latest is None or latest.empty or 'PriceDate' not in latest.columns:
+        return False
+    newest = pd.to_datetime(latest['PriceDate'], errors='coerce').max()
+    return bool(pd.notna(newest) and newest.normalize() >= pd.Timestamp(close).normalize())
+
+
 def build_updates(results: dict, latest: pd.DataFrame, macro: dict,
                   previous_latest: pd.DataFrame | None, run_id: str,
                   runtime_s: float, watchlist: str, n_requested: int) -> dict:
-    run_date = pd.Timestamp.today().normalize()
+    run_date = run_date_of(latest)
     hist = latest.copy()
     hist['date'] = run_date
     hist['run_id'] = run_id
@@ -475,7 +577,8 @@ def write_workbook(store: dict, updates: dict, path=TRACKER_PATH) -> None:
         else:
             df = updates.get(sheet) if updates.get(sheet) is not None else store.get(sheet)
         if df is not None and not df.empty:
-            book[sheet] = df
+            # `_ref_*`: the tracker's memory of what it last reported, not a figure.
+            book[sheet] = df.drop(columns=[c for c in df.columns if str(c).startswith('_')])
     if not book:
         return          # nothing inside the window yet; the store holds the record
 

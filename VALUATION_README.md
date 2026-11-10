@@ -39,7 +39,7 @@ arithmetic attached; nothing here is a recommendation to buy or sell anything.
 | **Graham's seven defensive tests** | *The Intelligent Investor*, ch. 14 | size, financial condition (current ratio and debt vs working capital; for utilities, debt vs equity), 10 years of earnings, 20 years of dividends, 10-year EPS growth, P/E <= 15, P/B <= 1.5 (or P/E x P/B <= 22.5) - seven tests, each counted once |
 | **Graham's 1976 ten-point screen** | his last published screen | five reward tests (earnings yield vs AAA, P/E vs its 5-year high, dividend yield, price vs tangible book, price vs NCAV) and five risk tests |
 | **Buffett quality proxies** | the Berkshire letters, plus labelled third-party proxies | ROE across the cycle, ROIC, debt repayable from earnings, margin level and stability, cash conversion, dilution, the 1984 one-dollar premise |
-| **Intrinsic value** | earnings-based models | two-stage DCF on owner earnings and earnings power value; for banks and insurers, justified P/B and earnings capitalised at the required return |
+| **Intrinsic value** | earnings-based models | two-stage DCF on owner earnings and earnings power value; for banks, insurers and utilities, justified P/B and earnings capitalised at the required return; for REITs, the DCF on funds from operations and the same FFO capitalised without growth |
 | **Graham's price limits** | his rules, restated as prices | 15 x 3-year average EPS (criterion 6), the Graham Number, net current assets and two-thirds of them - the most he would pay, shown beside the estimate |
 | **What the price assumes** | reverse DCF | the growth today's price needs, beside the growth the record supports |
 
@@ -78,7 +78,8 @@ which tax-deductible debt lowers (Modigliani-Miller, at market values).
 Verizon, with debt at 0.84x its market value, is discounted at 10.9% and
 capitalised at 8.1%; Apple, with almost none, at 9.0% for both. A flat 9%
 treated a heavily indebted company's shares as no riskier than its business.
-Banks and insurers borrow as their business, so their rate is not adjusted.
+Banks and insurers borrow as their business, and a utility's regulator sets
+its return on its book equity, debt and all, so their rate is not adjusted.
 
 **N/A is not Fail.** A test is N/A when its data does not exist, or when it does
 not apply - a current ratio for a bank is a category error. Collapsing the two
@@ -120,7 +121,10 @@ number. The verdict is deliberately coarse:
 
 `.github/workflows/valuation.yml` runs the tracker at 22:30 UTC on weekdays
 (after the US close), on any push that changes the code or the watchlist, and
-on demand from the Actions tab ("Run workflow"). Each run:
+on demand from the Actions tab ("Run workflow"). GitHub drops scheduled runs
+when it is busy - the first evening's never started - so a second schedule
+at 03:30 UTC catches up, and does nothing if the evening run recorded the
+day's close. Each run:
 
 1. runs the regression tests, and stops if any fail;
 2. restores the previous run's downloads (filings, prices, splits and
@@ -128,20 +132,25 @@ on demand from the Actions tab ("Run workflow"). Each run:
    changed;
 3. runs the tracker against the history store checked out from the `data`
    branch, and commits the new run back to it;
-4. posts what moved - a verdict, a margin band, a price crossing its
-   estimate or one of Graham's limits - as a comment on an issue labelled
-   `tracker-alerts`, which GitHub notifies whoever watches the repository of
-   (its owner, by default). Companies seen for the first time, and changes
-   that a new `CONFIG_VERSION` caused, are left out;
+4. posts what moved as a comment on an issue labelled `tracker-alerts`,
+   which GitHub notifies whoever watches the repository of (its owner, by
+   default). For the names in the watchlist that is any change - a verdict,
+   a margin band, a price crossing its estimate or one of Graham's limits;
+   for the rest of the index, only a verdict entering or leaving the four
+   that price a company at or below its estimate. Companies seen for the
+   first time, and changes that a new `CONFIG_VERSION` caused, are left out;
 5. publishes the dashboard as the Pages site, with the workbook beside it.
 
 The `data` branch is the record. The cache is only a speed-up: if GitHub
 evicts it, the next run downloads everything again and nothing is lost.
 
 The dashboard's *What changed* card lists the last 30 days of changes, rule
-changes included and marked as such. If the figures on the page are four or
-more days old - the schedule stopped, or runs are failing - a banner at the
-top says so.
+changes included and marked as such. A crossing or a margin band move counts
+only once it clears 2%, measured from the state last reported: on any day
+about twenty companies sit within 2% of a threshold, and ordinary price moves
+would report them crossing back and forth. If the figures on the page are
+four or more days old - the schedule stopped, or runs are failing - a banner
+at the top says so.
 
 **FRED needs an API key on GitHub.** Its keyless CSV download answers a home
 connection but leaves requests from GitHub's servers hanging, so without a
@@ -185,6 +194,8 @@ each now pinned by a test:
 | Per-share history on several share bases at once | Apple pre-2014, post-7:1, post-4:1 | divide each fact by the splits after **its filing date** |
 | Share counts filed in thousands or millions | NVIDIA FY08-09, Hershey 2009, Berkshire 08-09, McDonald's 2021-25, ConocoPhillips 2010-19, Garmin 2011-16 | repair exact orders of magnitude when two of three references agree: the whole history, the neighbouring years, and the year's own net income / EPS. Where the net income / EPS series runs smoothly and the filed one jumps a thousandfold, it decides alone: a long run of bad years carries both medians (ConocoPhillips: ten of nineteen years) |
 | A share count of zero | Constellation Energy before its 2022 spin-off; Ares before it became a corporation | read as no count; kept, it was a jump of "infx" that cut the per-share history |
+| A merger or listing shaped like a split | Cigna doubling its shares to buy Express Scripts; United and Continental; Datadog's IPO | a split-shaped jump stands as a split only with a split on record nearby or its one-day gap in the prices; revenue that grew with the shares, or prices that begin that year, make it an event, and the history is kept |
+| Revenue that is only part of the total | American Tower: $0.8bn of contract revenue beside $10.1bn of Revenues; Charter's $0.9bn of about $55bn; banks' fees alone | the largest revenue filed for the year - ASC 606 contract revenue leaves out leases, premiums and interest - but never the figure gross of excise taxes; for a bank, net interest income plus fees |
 | A total filed a thousandfold too large | Coherent FY2023 D&A: $681.7bn, against $267.6m + $414.1m of parts | the same vote, with depreciation + amortisation as the year's own figure |
 | Preferred stock filed at par | American Express: $1.6bn of preferred as 1,600 shares of $1m, and a value of zero | shares x liquidation price |
 | A new registrant for an old company | ExxonMobil's 2026 Texas holding company, with one quarterly report; Texas Pacific Land, a trust until 2021 | the predecessor's filings merged in, for the companies `CIK_SUCCESSIONS` names - EDGAR does not link the two |
@@ -225,7 +236,9 @@ version did, and it overstated Apple's DCF by a fifth.
 ## What accumulates, and where
 
 The record is the store, `valuation_tracker_store/`: `history`, `runlog` and
-`changes` are append-only parquet files, and `latest` is replaced each run. A
+`changes` are append-only parquet files, and `latest` is replaced each run.
+A run is dated by the market close it priced, not the machine's calendar, so
+a second run for the same close replaces the first one's rows. A
 run appends a few kilobytes and rewrites nothing already there. The workbook
 is a view regenerated from the store, with `History` and `Changes` cut to
 recent runs - 400 days for the 49-name watchlist, 100 for the S&P 500, to
@@ -491,6 +504,35 @@ errors no watchlist company had, and a gap in the dividend test:
   passed (24 years) with a note calling it refuted, and a value lost to a
   rule change was blamed on "the latest filings".
 
+Config r8 (2026-11-10) followed a look at where the S&P 500 results fell
+short. Each change was checked on all ~500 companies before it shipped:
+
+- **Revenue was a fraction of the total for 22 companies.** The chain read
+  ASC 606 contract revenue first, which leaves out leases, premiums and
+  interest: American Tower, Crown Castle and the apartment REITs, MetLife,
+  Humana and Hartford, Capital One and the regional banks, United Rentals,
+  ADM and Bunge, and Charter - one of the five *statistically cheap* - with
+  $0.9bn of revenue against $12.9bn of operating income. Another figure now
+  takes over only at twice the first; simply taking the largest read
+  Hasbro's and Republic Services' totals before eliminations.
+- **REITs and utilities can have a margin of safety.** None of 27 REITs or
+  37 utilities could before; on the local check, 25 REITs and 26 utilities
+  now do, with REITs at a median 1.33x their estimate and utilities at 2.19x.
+  Most still score *No* on Buffett's quality proxies, as before.
+- **Mergers and listings are no longer read as missed splits.** Of the
+  split-shaped breaks, Cigna, Global Payments, Evergy, United, Viatris,
+  Republic Services, Keurig Dr Pepper, Workday, Palantir and eight listings
+  (Datadog, Robinhood, Moderna, Coinbase, Bloom Energy, Twilio, GoDaddy,
+  Dell) keep their per-share history, with the move reported as an event.
+  Ten are still cut: T-Mobile and WTW have a split on record beside the
+  jump, and for Abbott, Blackstone, Carvana, Pentair, Kinder Morgan, Live
+  Nation, Johnson Controls and Targa nothing else explains it.
+- **The daily run** has a catch-up schedule, and runs are dated by the
+  close they priced (see *Running on GitHub*).
+- **Alerts** cover the watchlist in full and the rest of the index only
+  when a verdict enters or leaves the four priced at or below value; and a
+  crossing or band move must clear 2% from the state last reported.
+
 ## Known limits
 
 - **Two value models, not three.** With 15 x earnings moved to the price
@@ -498,7 +540,13 @@ errors no watchlist company had, and a gap in the dividend test:
   and the margin is withheld when they are more than 3x apart - which, for
   the S&P 500, is often (see above). That is the honest result: the models
   disagree, and averaging in a third that assumes no growth would only hide
-  it. Banks and insurers have justified P/B and an earnings value instead.
+  it. Banks, insurers and utilities have justified P/B and an earnings value
+  as well; REITs, capitalised FFO beside the DCF.
+- **Utilities at 9%.** A utility's earnings and book are valued at the same
+  required return as any business's. Investors have long accepted less from
+  regulated returns, so at 9% most utilities read as dear - a median 2.2x
+  their estimate on the local check; the reverse DCF shows the growth their
+  prices assume at that rate.
 - **Twenty years of dividends** come from the filings and, before them, the
   dividend record in Yahoo's price history, which begins at listing. A year
   the record covers only in part counts as paid if a dividend went ex in it,
