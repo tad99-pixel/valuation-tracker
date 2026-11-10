@@ -1441,6 +1441,31 @@ def test_no_fact_filed_after_the_as_of_date_reaches_a_panel():
     print('  point in time: nothing filed after the day reaches the panel')
 
 
+def test_share_breaks_are_judged_with_what_was_known_that_day():
+    """A split-shaped break is checked against the splits on record and the
+    start of the price record (r8). As of a past day, a split recorded after
+    it is no evidence, and "listed inside the twelve-year price window" is
+    measured from that day: as of 2014, a company first priced in 2011 had
+    listed that year; measured from today, it had not."""
+    doc = _point_in_time_doc()
+    splits = pd.Series([2.0, 2.0], index=pd.DatetimeIndex(['2013-06-03', '2015-06-01']))
+    _, then = F.build_panel('PIT', doc, {'sic': '2000'}, CFG, splits=splits, as_of='2014-12-31')
+    _, now = F.build_panel('PIT', doc, {'sic': '2000'}, CFG, splits=splits)
+    assert then['split_dates'] == ['2013-06-03'], then['split_dates']
+    assert now['split_dates'] == ['2013-06-03', '2015-06-01'], now['split_dates']
+
+    idx = years(8, 2007)
+    p = pd.DataFrame({'shares_used': [1e8] * 4 + [2e8] * 4, 'revenue': [10e9] * 8}, index=idx)
+    info = dict(F._share_basis_diagnostic(p), split_dates=[])
+    assert info['share_breaks'][0]['kind'] == 'split', info
+    days = pd.bdate_range('2011-03-01', '2014-12-31')
+    prices = pd.DataFrame({'Close': np.linspace(30, 60, len(days))}, index=days)
+    as_then = S._confirm_breaks(p, info, prices, as_of='2014-12-31')
+    assert as_then['per_share_reliable'] and 'listed that year' in as_then['share_events'][-1]
+    assert not S._confirm_breaks(p, info, prices)['per_share_reliable']
+    print('  point in time: share breaks judged on the splits and listings known that day')
+
+
 def test_price_age_is_measured_from_the_as_of_day():
     p, info, prices = synthetic_company()
     last = prices.index[-1]

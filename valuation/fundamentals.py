@@ -802,8 +802,11 @@ def build_panel(ticker: str, facts: dict, meta: dict,
         # `score` withholds every price comparison when it is False.
         'splits_known': splits is not None,
         # For `score`, which asks whether a split-shaped jump in the share
-        # count had a split on record near it.
-        'split_dates': ([pd.Timestamp(d).strftime('%Y-%m-%d') for d in splits.index]
+        # count had a split on record near it - on record by `as_of`, in a
+        # backtest: a later split restates the facts above, but is evidence
+        # nobody had that day.
+        'split_dates': ([pd.Timestamp(d).strftime('%Y-%m-%d') for d in splits.index
+                         if as_of is None or pd.Timestamp(d) <= _clock(as_of)]
                         if splits is not None and len(splits) else []),
         'error': None,
     }

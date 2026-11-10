@@ -95,7 +95,8 @@ def _market_value_change(prices: pd.DataFrame | None, panel: pd.DataFrame,
     return p1 * float(s1) - p0 * float(s0), f'{start:%Y-%m} to {end:%Y-%m}: {p0:,.2f} -> {p1:,.2f}'
 
 
-def _confirm_breaks(panel: pd.DataFrame, info: dict, prices: pd.DataFrame | None) -> dict:
+def _confirm_breaks(panel: pd.DataFrame, info: dict, prices: pd.DataFrame | None,
+                    as_of=None) -> dict:
     """Keep a split-shaped break in the share count only if a split explains it.
 
     `fundamentals._share_basis_diagnostic` reads a year-on-year move of almost
@@ -114,6 +115,10 @@ def _confirm_breaks(panel: pd.DataFrame, info: dict, prices: pd.DataFrame | None
       revenue that grew with a rising share count means a merger: the history
       is kept, with the move reported as an event;
     - anything else stands, as before.
+
+    A backtest asks as of its day (`as_of`): the twelve-year price window
+    ends there, its prices end there, and only the splits recorded by then
+    are in `split_dates` (`fundamentals.build_panel`).
     """
     breaks = info.get('share_breaks') or []
     if not any(b.get('kind') == 'split' for b in breaks):
@@ -123,8 +128,9 @@ def _confirm_breaks(panel: pd.DataFrame, info: dict, prices: pd.DataFrame | None
     first_price = close.index[0] if len(close) else None
     # The price download reaches back twelve years; a record that starts
     # inside that window starts at a listing.
+    clock = pd.Timestamp(as_of) if as_of is not None else pd.Timestamp.today()
     listed_late = (first_price is not None
-                   and first_price > pd.Timestamp.today() - pd.DateOffset(years=12) + pd.Timedelta(days=45))
+                   and first_price > clock - pd.DateOffset(years=12) + pd.Timedelta(days=45))
     splits = pd.to_datetime(info.get('split_dates') or [])
     rev = panel['revenue'] if 'revenue' in panel.columns else pd.Series(np.nan, index=panel.index)
     kept, events = [], list(info.get('share_events') or [])
@@ -304,7 +310,7 @@ def evaluate(ticker: str, panel: pd.DataFrame, info: dict,
             clock = pd.Timestamp(as_of) if as_of is not None else pd.Timestamp.today()
             stale_days = int((clock.normalize() - price_date).days)
 
-    info = _confirm_breaks(panel, info, prices)
+    info = _confirm_breaks(panel, info, prices, as_of)
     panel, truncation = _truncate_at_break(panel, info)
     basis_problem = _check_price_basis(price, panel, info)
     per_share_problem = _per_share_basis(price, panel, info)

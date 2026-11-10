@@ -12,7 +12,7 @@ python run_valuation.py --universe sp600        # every S&P 600 constituent inst
 python run_valuation.py --open                  # open the dashboard when done
 python run_valuation.py --force                 # refetch filings and prices, rebuild every panel
 python tests/test_valuation.py                  # regression tests, offline
-python backtest_valuation.py                     # the verdicts at each year-end 2014-23, and what followed
+python backtest_valuation.py                    # the verdicts at each year-end 2014-23, and what followed
 ```
 
 What the verdicts would have said in past years, and how those companies
