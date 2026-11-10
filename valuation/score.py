@@ -284,11 +284,15 @@ def _per_share_basis(price, panel: pd.DataFrame, info: dict):
 
 def evaluate(ticker: str, panel: pd.DataFrame, info: dict,
              prices: pd.DataFrame | None, macro: dict,
-             cfg: ValuationConfig, payments: pd.Series | None = None) -> dict:
+             cfg: ValuationConfig, payments: pd.Series | None = None,
+             as_of=None) -> dict:
     """Run every test on one company and return a single structured result.
 
     `payments` is its dividend history from the price record, which lets the
-    twenty-year dividend test look past the start of XBRL."""
+    twenty-year dividend test look past the start of XBRL. `as_of` is the
+    backtest's day (see `fundamentals.build_panel`): the price's age is
+    measured from it rather than from today. The price itself is the last
+    close in `prices`, so a backtest passes them cut at that day."""
     info = dict(info)
 
     price, price_date, stale_days = None, None, None
@@ -297,7 +301,8 @@ def evaluate(ticker: str, panel: pd.DataFrame, info: dict,
         if len(close):
             price = float(close.iloc[-1])
             price_date = close.index[-1]
-            stale_days = int((pd.Timestamp.today().normalize() - price_date).days)
+            clock = pd.Timestamp(as_of) if as_of is not None else pd.Timestamp.today()
+            stale_days = int((clock.normalize() - price_date).days)
 
     info = _confirm_breaks(panel, info, prices)
     panel, truncation = _truncate_at_break(panel, info)

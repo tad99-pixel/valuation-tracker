@@ -11,9 +11,12 @@
 !/run_valuation.py
 !/valuation_watchlist.txt
 !/valuation/
+!/backtest_valuation.py
+!/BACKTEST.md
 !/tests/
 /tests/*
 !/tests/test_valuation.py
+!/tests/test_backtest.py
 
 __pycache__/
 *.pyc

@@ -27,6 +27,11 @@ What this module does not do: restate anything itself, or fill a gap by
 interpolation. A missing year stays missing, so a test that needs ten years
 can tell the difference between a company with nine good years and a company
 with nine good years and one bad one.
+
+**Point in time.** `build_panel(..., as_of=day)` builds the panel a reader
+could have built at the close of that day: only facts filed on or before it
+(`facts_as_of`), and that day, not today, as the clock every staleness rule
+reads. The backtest uses it; a live run passes no date and is unchanged.
 """
 
 from __future__ import annotations
@@ -261,6 +266,41 @@ PER_SHARE_COLUMNS = PER_SHARE_CONCEPTS + (
 # ---------------------------------------------------------------------------
 # Fact extraction
 # ---------------------------------------------------------------------------
+
+def facts_as_of(facts: dict, as_of) -> dict:
+    """The companyfacts document as it stood at the close of `as_of`.
+
+    Every fact filed on or before that day and none filed after it, so the
+    restatements, new fiscal years and cover-page counts that later filings
+    added are gone, and latest-filed-wins (trap 1) picks among what had been
+    filed by then. Apple's FY2012 EPS is 44.15 in a document cut at the end
+    of 2013 and 6.31 in one cut at the end of 2014, after the restatement. A
+    fact with no filing date is dropped: it cannot be shown to have been
+    public that day. Returns a new document; `facts` is not modified.
+    """
+    cutoff = pd.Timestamp(as_of).strftime('%Y-%m-%d')
+    out = {k: v for k, v in facts.items() if k != 'facts'}
+    out['facts'] = {}
+    for taxonomy, concepts in (facts.get('facts') or {}).items():
+        kept = {}
+        for name, node in concepts.items():
+            units = {}
+            for unit, rows in (node.get('units') or {}).items():
+                # ISO dates compare as strings; the slice drops any time part.
+                rows = [r for r in rows if r.get('filed') and str(r['filed'])[:10] <= cutoff]
+                if rows:
+                    units[unit] = rows
+            if units:
+                kept[name] = dict(node, units=units)
+        out['facts'][taxonomy] = kept
+    return out
+
+
+def _clock(as_of=None) -> pd.Timestamp:
+    """The day every staleness rule measures from: `as_of` in a backtest,
+    otherwise today."""
+    return (pd.Timestamp(as_of) if as_of is not None else pd.Timestamp.today()).normalize()
+
 
 def _units_for(concept: str) -> tuple:
     if concept in PER_SHARE_CONCEPTS or concept == 'preferred_price_per_share':
@@ -630,7 +670,8 @@ def _split_factors(filed: pd.Series, splits: pd.Series) -> pd.Series:
 
 
 def build_panel(ticker: str, facts: dict, meta: dict,
-                cfg: ValuationConfig, splits: pd.Series | None = None) -> tuple:
+                cfg: ValuationConfig, splits: pd.Series | None = None,
+                as_of=None) -> tuple:
     """Return ``(annual DataFrame, info dict)`` for one company.
 
     The frame is indexed by fiscal-period end date, one row per fiscal year,
@@ -642,7 +683,18 @@ def build_panel(ticker: str, facts: dict, meta: dict,
     Pass `splits=None` only when the company has never split; otherwise the
     per-share history spans several bases and every per-share test built on it
     is meaningless.
+
+    `as_of` (a date) builds the panel as it could have been built at the
+    close of that day: facts filed after it are dropped first
+    (`facts_as_of`), and the history window, the filing's age and the
+    current share count are judged from that day. Left None - every live
+    run - nothing is dropped and the day is today. Splits after `as_of`
+    still restate the per-share figures, onto the same basis as today's
+    split-adjusted price history: a constant factor on every per-share
+    figure and on the price alike, which no ratio sees.
     """
+    if as_of is not None:
+        facts = facts_as_of(facts, as_of)
     duration, tags_used, filed_dates = {}, {}, {}
     for concept, tags in DURATION_CONCEPTS.items():
         got = _annual_duration_series(facts, tags, concept)
@@ -712,7 +764,7 @@ def build_panel(ticker: str, facts: dict, meta: dict,
 
     panel = panel.sort_index()
     if cfg.history_years:
-        cutoff = pd.Timestamp.today().normalize() - pd.DateOffset(years=cfg.history_years + 1)
+        cutoff = _clock(as_of) - pd.DateOffset(years=cfg.history_years + 1)
         panel = panel.loc[panel.index >= cutoff]
 
     panel = _derive_columns(panel)
@@ -756,28 +808,28 @@ def build_panel(ticker: str, facts: dict, meta: dict,
         'error': None,
     }
     info.update(_share_basis_diagnostic(panel))
-    return panel, _dated_info(panel, info, cfg)
+    return panel, _dated_info(panel, info, cfg, as_of)
 
 
-def _dated_info(panel: pd.DataFrame, info: dict, cfg) -> dict:
-    """The parts of `info` that depend on today's date.
+def _dated_info(panel: pd.DataFrame, info: dict, cfg, as_of=None) -> dict:
+    """The parts of `info` that depend on today's date (or `as_of`'s).
 
     Recomputed on every run, including for a panel reused from the cache: a
     cover-page count that was fresh when the panel was built goes stale
     without the filing changing, and so does the filing itself.
     """
     shares_now, why = _vet_current_shares(panel, info.get('cover_shares'),
-                                          info.get('cover_filed'), cfg)
+                                          info.get('cover_filed'), cfg, as_of)
     info['shares_outstanding_now'], info['shares_now_source'] = shares_now, why
     if len(panel):
-        age = int((pd.Timestamp.today().normalize() - panel.index[-1]).days)
+        age = int((_clock(as_of) - panel.index[-1]).days)
         info['last_fy_age_days'], info['filing_stale'] = age, age > cfg.max_filing_age_days
     else:
         info['last_fy_age_days'], info['filing_stale'] = None, True
     return info
 
 
-def _vet_current_shares(panel: pd.DataFrame, cover, cover_filed, cfg) -> tuple:
+def _vet_current_shares(panel: pd.DataFrame, cover, cover_filed, cfg, as_of=None) -> tuple:
     """The share count a per-share valuation divides by - or None.
 
     A DCF or EPV produces a value for the whole company; dividing it by the
@@ -797,8 +849,10 @@ def _vet_current_shares(panel: pd.DataFrame, cover, cover_filed, cfg) -> tuple:
        unmeasurable. Visa and Berkshire land here: both tag their share
        classes only with dimensions this source does not carry, and a value
        per share on an unknown share basis is not a value per share.
+
+    "Recently" is measured from `as_of` when one is given (see `build_panel`).
     """
-    today = pd.Timestamp.today().normalize()
+    today = _clock(as_of)
     shares = (panel['shares_used'] if 'shares_used' in panel.columns
               else pd.Series(dtype=float))
     latest = None

@@ -12,7 +12,12 @@ python run_valuation.py --universe sp600        # every S&P 600 constituent inst
 python run_valuation.py --open                  # open the dashboard when done
 python run_valuation.py --force                 # refetch filings and prices, rebuild every panel
 python tests/test_valuation.py                  # regression tests, offline
+python backtest_valuation.py                     # the verdicts at each year-end 2014-23, and what followed
 ```
+
+What the verdicts would have said in past years, and how those companies
+then did, is in [BACKTEST.md](BACKTEST.md): every panel rebuilt from the
+facts filed by each year-end, nothing later.
 
 Each run appends to the history store in `valuation_tracker_store/`, refreshes
 `valuation_tracker.xlsx` (a view of recent history), and writes

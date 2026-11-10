@@ -16,6 +16,9 @@ US close every trading day.
 - **History:** every run is kept on the `data` branch
   (`valuation_tracker_store/`), and the site links to a workbook of the recent
   runs.
+- **Backtest:** [BACKTEST.md](BACKTEST.md) - the verdicts the tracker would
+  have given at each year-end from 2014 to 2023, from the filings of the
+  time, and the returns that followed.
 
 Research tooling. Every figure applies a stated rule to public filings; none
 of it is investment advice.

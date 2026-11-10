@@ -1341,6 +1341,116 @@ def test_archive_keeps_a_month_daily_then_one_a_month():
     print(f'  archive: {len(left)} of 120 daily copies kept')
 
 
+# ---------------------------------------------------------------------------
+# Point in time (backtest_valuation.py)
+# ---------------------------------------------------------------------------
+
+def _point_in_time_doc() -> dict:
+    """Five annual reports, FY2011-15, each filed in February and each
+    restating the year before - the shape of a real filer's document - with
+    a balance sheet and a cover-page share count in every report."""
+    eps, ni, sh, eq, cover = [], [], [], [], []
+    for i, fy in enumerate(range(2011, 2016)):
+        filed = f'{fy + 1}-02-20'
+        start, end = f'{fy}-01-01', f'{fy}-12-31'
+        eps.append(dur(start, end, 2.0 + 0.2 * i, filed))
+        ni.append(dur(start, end, (2.0 + 0.2 * i) * 1e9, filed))
+        sh.append(dur(start, end, 1e9, filed))
+        eq.append({'end': end, 'val': 10e9 + 1e9 * i, 'filed': filed, 'form': '10-K'})
+        cover.append({'end': f'{fy + 1}-02-01', 'val': 1e9 - 1e6 * i, 'filed': filed})
+        if i:                       # the prior year, restated in this report
+            prior = (f'{fy - 1}-01-01', f'{fy - 1}-12-31')
+            eps.append(dur(*prior, 1.9 + 0.2 * (i - 1), filed))
+            ni.append(dur(*prior, (1.9 + 0.2 * (i - 1)) * 1e9, filed))
+    return facts_doc({'EarningsPerShareDiluted': {'USD/shares': eps},
+                      'NetIncomeLoss': {'USD': ni},
+                      'WeightedAverageNumberOfDilutedSharesOutstanding': {'shares': sh},
+                      'StockholdersEquity': {'USD': eq}},
+                     dei={'EntityCommonStockSharesOutstanding': {'shares': cover}})
+
+
+def _rewrite_after(doc: dict, as_of) -> dict:
+    """A copy of `doc` in which every fact filed after `as_of` is changed, and
+    to which a later fiscal year and a new tag, both filed later, are added."""
+    import copy
+    cut = pd.Timestamp(as_of)
+    out = copy.deepcopy(doc)
+    for concepts in out['facts'].values():
+        for node in concepts.values():
+            for rows in node['units'].values():
+                for r in rows:
+                    if pd.Timestamp(r['filed']) > cut:
+                        r['val'] = r['val'] * 1000 + 7
+    later = (cut + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
+    gaap = out['facts']['us-gaap']
+    gaap['NetIncomeLoss']['units']['USD'].append(dur('2030-01-01', '2030-12-31', 9e15, later))
+    gaap['Revenues'] = {'units': {'USD': [dur('2012-01-01', '2012-12-31', 5e15, later)]}}
+    out['facts']['dei']['EntityCommonStockSharesOutstanding']['units']['shares'].append(
+        {'end': later, 'val': 3e12, 'filed': later})
+    return out
+
+
+def test_no_fact_filed_after_the_as_of_date_reaches_a_panel():
+    """The backtest rebuilds each panel as of a past day. Every fact filed
+    after that day is rewritten, and a later year and a new tag are added:
+    the panel and everything in `info` that the scorer reads must not move.
+    The days include a filing date itself (that report counts) and the day
+    before one (it does not)."""
+    doc = _point_in_time_doc()
+    keys = ('n_years', 'first_fy', 'last_fy', 'cover_shares', 'cover_filed',
+            'shares_outstanding_now', 'shares_now_source', 'tags_used',
+            'per_share_reliable', 'share_unit_fixes', 'last_fy_age_days', 'filing_stale')
+    for day in ('2012-12-31', '2013-02-19', '2013-02-20', '2013-12-31', '2014-12-31',
+                '2016-06-30'):
+        a, ia = F.build_panel('PIT', doc, {'sic': '2000'}, CFG,
+                              splits=pd.Series(dtype=float), as_of=day)
+        b, ib = F.build_panel('PIT', _rewrite_after(doc, day), {'sic': '2000'}, CFG,
+                              splits=pd.Series(dtype=float), as_of=day)
+        pd.testing.assert_frame_equal(a, b, check_freq=False)
+        for k in keys:
+            assert ia.get(k) == ib.get(k), (day, k, ia.get(k), ib.get(k))
+        assert a.index[-1] < pd.Timestamp(day), (day, a.index[-1])
+
+    # What a reader saw at the end of 2013: FY2012 as first filed (2.20, the
+    # 2.10 restatement came in 2014), FY2011 as restated in 2013 (1.90), and
+    # the cover count of the report filed in 2013.
+    p, info = F.build_panel('PIT', doc, {'sic': '2000'}, CFG,
+                            splits=pd.Series(dtype=float), as_of='2013-12-31')
+    assert [round(x, 2) for x in p['eps_diluted']] == [1.9, 2.2], list(p['eps_diluted'])
+    assert info['cover_shares'] == 1e9 - 1e6 and info['last_fy_age_days'] == 365, info
+    assert info['shares_outstanding_now'] == 1e9 - 1e6 and not info['filing_stale'], info
+    # Splits after the day restate everything onto today's basis, as today's
+    # split-adjusted price history is.
+    p2, _ = F.build_panel('PIT', doc, {'sic': '2000'}, CFG, as_of='2013-12-31',
+                          splits=pd.Series([2.0], index=pd.DatetimeIndex(['2014-06-02'])))
+    assert [round(x, 2) for x in p2['eps_diluted']] == [0.95, 1.1], list(p2['eps_diluted'])
+    # A fact with no filing date cannot be shown to have been public.
+    undated = facts_doc({'NetIncomeLoss': {'USD': [{'start': '2011-01-01', 'end': '2011-12-31',
+                                                   'val': 1e9, 'form': '10-K'}]}})
+    assert F.facts_as_of(undated, '2020-01-01')['facts']['us-gaap'] == {}
+    assert 'filed' not in undated['facts']['us-gaap']['NetIncomeLoss']['units']['USD'][0]
+
+    # No date is today: every fact counts, and the clock is today's - by
+    # which this five-year-old filing is stale and its cover count unusable.
+    now, inow = F.build_panel('PIT', doc, {'sic': '2000'}, CFG, splits=pd.Series(dtype=float))
+    today, itoday = F.build_panel('PIT', doc, {'sic': '2000'}, CFG,
+                                  splits=pd.Series(dtype=float), as_of=pd.Timestamp.today())
+    pd.testing.assert_frame_equal(now, today, check_freq=False)
+    assert {k: inow.get(k) for k in keys} == {k: itoday.get(k) for k in keys}
+    assert len(now) == 5 and inow['filing_stale'] and inow['shares_outstanding_now'] is None
+    print('  point in time: nothing filed after the day reaches the panel')
+
+
+def test_price_age_is_measured_from_the_as_of_day():
+    p, info, prices = synthetic_company()
+    last = prices.index[-1]
+    r = S.evaluate('X', p, info, prices, MACRO, CFG, as_of=last + pd.Timedelta(days=3))
+    assert r['price_stale_days'] == 3, r['price_stale_days']
+    r = S.evaluate('X', p, info, prices, MACRO, CFG)
+    assert r['price_stale_days'] == (pd.Timestamp.today().normalize() - last).days
+    print('  point in time: price age from the as-of day')
+
+
 if __name__ == '__main__':
     tests = [v for k, v in list(globals().items()) if k.startswith('test_') and callable(v)]
     for fn in tests:
