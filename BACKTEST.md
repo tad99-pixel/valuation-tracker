@@ -2,7 +2,7 @@
 
 The tracker's verdicts and price-to-value ratios, as it would have given them
 at each year-end from 2014 to 2023, set against the total returns that
-followed. Run on 2026-11-10 with config r7; returns to 2026-11-09.
+followed. Run on 2026-11-10 with config r8; returns to 2026-11-09.
 
 > **Survivorship bias - read this first.** The universe is *today's* S&P 500.
 > Every company in it survived to 2026, and many joined the index only after
@@ -20,25 +20,26 @@ followed. Run on 2026-11-10 with config r7; returns to 2026-11-09.
 
 - **The tracker's buy list lagged.** *Candidate* and *Cheap, quality
   passes* together - about nine companies a year - trailed the
-  equal-weighted universe by 7.8% a year over one-year windows (ahead in 3
-  of 10 years; t = -2.0), by 9.1% a year over three years and 7.9% over
+  equal-weighted universe by 7.6% a year over one-year windows (ahead in 3
+  of 10 years; t = -2.0), by 9.1% a year over three years and 7.6% over
   five, behind in every one of those 16 overlapping windows. Among companies
   that were in the index at the time, *Candidate* trailed by 2.6% a year.
 - **The worst verdict was *Cheap, quality passes*:** -19.1% a year (t =
   -2.6) - but it held fewer than two companies a year, and eight of its 19
   company-years were Gilead and Biogen, as their franchises eroded.
 - **Price-to-value ranked nothing.** The cheapest fifth by measured
-  price-to-value did no better than the dearest (-2.6% a year over one year,
-  -1.3% over three, -1.5% over five); the rank correlation with the next
-  year's return was -0.04. Including the margins the tracker withholds makes
+  price-to-value did no better than the dearest (-1.4% a year over one year,
+  -0.7% over three, -1.6% over five); the rank correlation with the next
+  year's return was -0.02. Including the margins the tracker withholds makes
   no difference.
 - **This was a bad decade for any value sort.** Ranking the same companies
-  by plain earnings yield did worse (-4.6% a year, cheapest minus dearest),
-  and across the whole universe -10.8%. The tracker's measure lost less than
-  a P/E sort, but nothing here shows it finding anything.
+  by plain earnings yield did about as badly over one year (-1.9% a year,
+  cheapest minus dearest) and worse over five (-4.2%); across the whole
+  universe, -11.9%. The tracker's measure lost less than a P/E sort over the
+  longer windows, but nothing here shows it finding anything.
 - **The best verdict was *Good business, value unclear*** - the businesses
   whose models disagree by more than 3x, mostly growth companies whose DCF
-  runs far above their earnings power - at +2.9% a year (t = 1.9), and
+  runs far above their earnings power - at +3.0% a year (t = 1.7), and
   ahead in all seven five-year windows.
 
 The buy list's members explain most of it. Asset managers in secular decline
@@ -47,16 +48,17 @@ biotechs past their peak (Gilead, Biogen), refiners and chemical and
 fertiliser makers - the cyclicals a ten-year record flatters - airlines and
 a cruise line, Paramount through its streaming losses, legacy hardware (IBM,
 HP, Western Digital): businesses with ten good years behind them, priced
-for decline, and mostly declining.
-The quality tests read the trailing decade, and a business whose economics
-are deteriorating passes them until well after its price has fallen. Meta in
-2022 (+168% the next year) and Intel in 2022 were the exceptions.
+for decline, and mostly declining. The quality tests read the trailing
+decade, and a business whose economics are deteriorating passes them until
+well after its price has fallen. Meta in 2022 (+168% the next year) and
+Intel in 2022 were the exceptions.
 
 Ten annual observations are few. With nine degrees of freedom a t-statistic
-needs to pass 2.26 for the usual 5% test; only *Cheap, quality passes*
-does, on 19 company-years. Three- and five-year windows overlap and carry no
-t-statistic. This is one decade, in which growth beat value; it is evidence
-that the verdicts did not help over it, not proof that they cannot.
+needs to pass 2.26 for the usual 5% test; only *Cheap, quality passes*, on
+19 company-years, and *Insufficient data* - a survivorship artefact, below -
+do. Three- and five-year windows overlap and carry no t-statistic. This is
+one decade, in which growth beat value; it is evidence that the verdicts did
+not help over it, not proof that they cannot.
 
 ## How it was run
 
@@ -79,9 +81,11 @@ configuration, at each year-end from 2014 to 2023:
   several kept filing as subsidiaries for years.
 - **Prices as of the day:** the year-end close, with the twelve years of
   closes before it that the tracker downloads, and the dividend record cut
-  at the day. **Macro as of the day:** the AAA yield of the last month
-  completed, the CPI of the last month published (November's, both, at a
-  December year-end).
+  at the day. Config r8's check on a split-shaped break in the share count
+  reads that price record and the splits on record, and both stop at the
+  day. **Macro as of the day:** the AAA yield of the last month completed,
+  the CPI of the last month published (November's, both, at a December
+  year-end).
 - **Returns:** total returns from the year-end close over one, three and
   five years, from Yahoo's closes and dividends, each dividend reinvested at
   its ex-date close (the CRSP convention). They match Yahoo's adjusted
@@ -102,76 +106,76 @@ configuration, at each year-end from 2014 to 2023:
 
 | Year-end | Priced | Verdict given | Median years on file | Margin measured | Median P/V | Candidate or cheap + quality | Fair price | Statistically cheap | Dear | Value unclear | No / watch | No verdict |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 2014 | 455 | 382 | 7 | 266 | 1.92x | 4 | 5 | 3 | 132 | 33 | 205 | 73 |
-| 2015 | 462 | 395 | 8 | 283 | 1.77x | 18 | 5 | 3 | 129 | 35 | 205 | 67 |
-| 2016 | 467 | 414 | 9 | 279 | 1.86x | 7 | 5 | 3 | 136 | 37 | 226 | 53 |
-| 2017 | 471 | 427 | 10 | 269 | 2.12x | 4 | 3 | 0 | 142 | 37 | 241 | 44 |
-| 2018 | 475 | 440 | 11 | 265 | 1.73x | 10 | 8 | 6 | 143 | 47 | 226 | 35 |
-| 2019 | 480 | 453 | 12 | 258 | 1.95x | 5 | 5 | 5 | 150 | 54 | 234 | 27 |
-| 2020 | 485 | 453 | 13 | 261 | 2.11x | 15 | 2 | 5 | 155 | 53 | 223 | 32 |
-| 2021 | 489 | 460 | 14 | 259 | 2.50x | 3 | 4 | 0 | 165 | 54 | 234 | 29 |
-| 2022 | 491 | 469 | 15 | 246 | 1.81x | 14 | 9 | 8 | 154 | 64 | 220 | 22 |
-| 2023 | 492 | 475 | 16 | 246 | 1.87x | 9 | 8 | 12 | 146 | 65 | 235 | 17 |
+| 2014 | 455 | 384 | 7 | 290 | 1.94x | 4 | 5 | 3 | 136 | 32 | 204 | 71 |
+| 2015 | 462 | 397 | 8 | 305 | 1.77x | 18 | 5 | 3 | 132 | 34 | 205 | 65 |
+| 2016 | 467 | 414 | 9 | 301 | 1.84x | 7 | 5 | 3 | 138 | 36 | 225 | 53 |
+| 2017 | 471 | 428 | 10 | 297 | 2.05x | 4 | 3 | 1 | 144 | 36 | 240 | 43 |
+| 2018 | 475 | 443 | 11 | 296 | 1.71x | 10 | 8 | 10 | 144 | 46 | 225 | 32 |
+| 2019 | 480 | 454 | 12 | 294 | 1.94x | 6 | 5 | 6 | 151 | 53 | 233 | 26 |
+| 2020 | 485 | 456 | 13 | 306 | 2.07x | 16 | 3 | 7 | 156 | 51 | 223 | 29 |
+| 2021 | 489 | 463 | 14 | 305 | 2.40x | 3 | 5 | 2 | 166 | 52 | 235 | 26 |
+| 2022 | 491 | 470 | 15 | 290 | 1.79x | 15 | 9 | 9 | 155 | 60 | 222 | 21 |
+| 2023 | 492 | 477 | 16 | 292 | 1.75x | 9 | 8 | 13 | 147 | 60 | 240 | 15 |
 
 XBRL begins in 2009, so in 2014 the median company had seven fiscal years on
 file and Graham's ten-year tests were mostly unmeasurable; *No verdict*
-(insufficient data, or no annual report yet) falls from 73 to 17 as the
+(insufficient data, or no annual report yet) falls from 71 to 15 as the
 record lengthens. The market looked dearest to the tracker at the end of
-2021 (median 2.50x its estimate).
+2021 (median 2.40x its estimate).
 
 ### Verdict groups against the equal-weighted universe
 
 | Verdict | Company-years | Per year | 1y return | 1y excess | 1y ahead | t (1y) | 3y excess | 3y ahead | 5y excess | 5y ahead |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Candidate | 70 | 7.0 | 11.0% | -6.1% | 3/10 | -1.6 | -7.9% | 1/9 | -6.9% | 0/7 |
+| Candidate | 73 | 7.3 | 11.1% | -6.1% | 3/10 | -1.7 | -8.0% | 0/9 | -6.6% | 1/7 |
 | Cheap, quality passes | 19 | 1.9 | -2.0% | -19.1% | 1/10 | -2.6 | -13.9% | 0/9 | -10.3% | 0/7 |
-| Good business, fair price | 54 | 5.4 | 14.6% | -2.6% | 3/10 | -0.4 | -3.6% | 3/9 | -2.6% | 3/7 |
-| Statistically cheap only | 45 | 5.6 | 25.1% | +2.3% | 5/8 | +0.4 | -1.7% | 2/7 | +0.0% | 3/6 |
-| Good business, dear | 1452 | 145.2 | 15.2% | -1.9% | 4/10 | -1.3 | -1.8% | 3/9 | -0.2% | 4/7 |
-| Good business, value unclear | 479 | 47.9 | 20.0% | +2.9% | 7/10 | +1.9 | +2.4% | 7/9 | +3.8% | 7/7 |
-| No | 2248 | 224.8 | 16.5% | -0.6% | 4/10 | -0.6 | -1.0% | 3/9 | -1.2% | 1/7 |
-| Insufficient data | 320 | 32.0 | 34.0% | +16.9% | 9/10 | +2.3 | +12.4% | 8/9 | +3.4% | 7/7 |
+| Good business, fair price | 56 | 5.6 | 16.4% | -0.8% | 4/10 | -0.1 | -2.7% | 4/9 | -1.8% | 3/7 |
+| Statistically cheap only | 57 | 5.7 | 18.8% | +1.7% | 6/10 | +0.4 | -1.9% | 4/9 | -2.5% | 2/7 |
+| Good business, dear | 1469 | 146.9 | 15.1% | -2.0% | 4/10 | -1.4 | -1.9% | 3/9 | -0.3% | 4/7 |
+| Good business, value unclear | 460 | 46.0 | 20.2% | +3.0% | 6/10 | +1.7 | +2.8% | 7/9 | +4.1% | 7/7 |
+| No | 2251 | 225.1 | 16.7% | -0.5% | 5/10 | -0.4 | -0.8% | 3/9 | -1.2% | 1/7 |
+| Insufficient data | 302 | 30.2 | 32.0% | +14.9% | 9/10 | +2.3 | +11.9% | 9/9 | +3.8% | 7/7 |
 | No annual report yet | 79 | 7.9 | 22.1% | +5.0% | 6/10 | +0.5 | +9.4% | 8/9 | +5.2% | 5/7 |
 
 The universe: 477 companies a year; 17.1% a year over one-year windows (10
 of them), 17.4% over three-year (9), 16.8% over five-year (7). One *Watch*
 is left out. *Insufficient data*'s lead is survivorship, not signal: it is
 mostly young companies with short filing records that later grew into the
-index, and among companies in the index at the time it is +1.1% a year.
+index, and among companies in the index at the time it is +1.2% a year.
 
 ### The tracker's buy list
 
 | Group | Company-years | Per year | 1y return | 1y excess | 1y ahead | t (1y) | 3y excess | 3y ahead | 5y excess | 5y ahead |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Candidate or cheap, quality passes | 89 | 8.9 | 9.4% | -7.8% | 3/10 | -2.0 | -9.1% | 0/9 | -7.9% | 0/7 |
-| Statistically cheap only | 45 | 5.6 | 25.1% | +2.3% | 5/8 | +0.4 | -1.7% | 2/7 | +0.0% | 3/6 |
-| Everything else | 4633 | 463.3 | 17.3% | +0.1% | 6/10 | +1.0 | +0.1% | 8/9 | +0.1% | 7/7 |
+| Candidate or cheap, quality passes | 92 | 9.2 | 9.5% | -7.6% | 3/10 | -2.0 | -9.1% | 0/9 | -7.6% | 0/7 |
+| Statistically cheap only | 57 | 5.7 | 18.8% | +1.7% | 6/10 | +0.4 | -1.9% | 4/9 | -2.5% | 2/7 |
+| Everything else | 4618 | 461.8 | 17.3% | +0.1% | 6/10 | +1.0 | +0.1% | 8/9 | +0.1% | 7/7 |
 
 ### Price-to-value
 
 Within each year-end, the companies whose margin of safety the tracker
-measured (about 260 a year: the models agree within 3x) are ranked into
+measured (about 300 a year: the models agree within 3x) are ranked into
 fifths by price-to-value.
 
 | Quintile | Median P/V | Per year | 1y return | 1y excess | 1y ahead | t (1y) | 3y excess | 3y ahead | 5y excess | 5y ahead |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 (cheapest) | 1.02x | 53.1 | 14.6% | -2.5% | 4/10 | -1.0 | -2.9% | 1/9 | -1.9% | 3/7 |
-| 2 | 1.50x | 52.5 | 13.0% | -4.1% | 3/10 | -2.1 | -1.6% | 3/9 | -1.3% | 1/7 |
-| 3 | 1.93x | 52.4 | 15.0% | -2.1% | 3/10 | -1.9 | -2.0% | 2/9 | -0.4% | 2/7 |
-| 4 | 2.45x | 52.5 | 13.7% | -3.4% | 2/10 | -1.9 | -1.8% | 2/9 | -0.8% | 3/7 |
-| 5 (dearest) | 3.82x | 52.7 | 17.3% | +0.1% | 5/10 | +0.1 | -1.6% | 5/9 | -0.4% | 3/7 |
+| 1 (cheapest) | 1.03x | 59.9 | 14.3% | -2.9% | 3/10 | -1.1 | -3.0% | 1/9 | -2.4% | 1/7 |
+| 2 | 1.49x | 59.4 | 13.2% | -3.9% | 3/10 | -1.8 | -2.7% | 3/9 | -2.3% | 1/7 |
+| 3 | 1.91x | 59.3 | 13.9% | -3.2% | 3/10 | -2.1 | -3.3% | 1/9 | -1.1% | 2/7 |
+| 4 | 2.41x | 59.4 | 13.2% | -4.0% | 2/10 | -2.5 | -2.6% | 1/9 | -1.4% | 2/7 |
+| 5 (dearest) | 3.61x | 59.6 | 15.7% | -1.5% | 5/10 | -0.8 | -2.3% | 5/9 | -0.7% | 3/7 |
 
 Every quintile trails the universe because the companies the tracker can
-measure (14.7% a year) trail the ones it cannot - young and fast-growing
+measure (14.0% a year) trail the ones it cannot - young and fast-growing
 companies, whose models disagree. The question is the slope across the
 quintiles, and there is none - or a slightly wrong-way one:
 
 | Ranking | Ranked per year | 1y cheapest - dearest | t | 1y rank corr. | t | 3y cheapest - dearest | 3y rank corr. | 5y cheapest - dearest | 5y rank corr. |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Price-to-value, margin measured | 263 | -2.6% | -0.6 | -0.036 | -0.6 | -1.3% | -0.057 | -1.5% | -0.062 |
-| Price-to-value, every estimate | 434 | -0.4% | -0.1 | -0.004 | -0.1 | +0.6% | -0.022 | -1.8% | -0.037 |
-| Earnings yield, the same 263 | 263 | -4.6% | -1.0 | -0.053 | -0.8 | -4.6% | -0.105 | -5.6% | -0.157 |
-| Earnings yield, every company with 3 years of EPS | 456 | -10.8% | -1.9 | -0.052 | -0.9 | -9.5% | -0.089 | -6.8% | -0.134 |
+| Price-to-value, margin measured | 298 | -1.4% | -0.4 | -0.016 | -0.3 | -0.7% | -0.046 | -1.6% | -0.068 |
+| Price-to-value, every estimate | 440 | -1.9% | -0.5 | -0.016 | -0.3 | -1.0% | -0.039 | -2.6% | -0.056 |
+| Earnings yield, the same companies | 297 | -1.9% | -0.5 | -0.020 | -0.3 | -2.5% | -0.054 | -4.2% | -0.101 |
+| Earnings yield, every company with 3 years of EPS | 459 | -11.9% | -1.9 | -0.054 | -0.9 | -10.6% | -0.092 | -6.9% | -0.136 |
 
 The rank correlation is oriented so that a positive number means the
 cheaper did better. Earnings yield is three-year average EPS over the price.
@@ -222,23 +226,23 @@ at a premium cut the other way.
 
 | Verdict | Company-years | Per year | 1y return | 1y excess | 1y ahead | t (1y) | 3y excess | 3y ahead | 5y excess | 5y ahead |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Candidate | 66 | 6.6 | 11.1% | -2.6% | 3/10 | -0.7 | -4.6% | 3/9 | -5.0% | 1/7 |
+| Candidate | 69 | 6.9 | 11.2% | -2.6% | 3/10 | -0.7 | -4.8% | 1/9 | -4.7% | 1/7 |
 | Cheap, quality passes | 18 | 1.8 | -1.6% | -15.3% | 1/10 | -2.3 | -9.9% | 1/9 | -7.5% | 1/7 |
-| Good business, fair price | 51 | 5.1 | 14.0% | +0.3% | 2/10 | +0.1 | -0.8% | 4/9 | -0.9% | 3/7 |
-| Statistically cheap only | 43 | 5.4 | 23.6% | +4.8% | 5/8 | +0.9 | -0.3% | 4/7 | -0.4% | 4/6 |
-| Good business, dear | 1298 | 129.8 | 14.3% | +0.6% | 5/10 | +0.5 | +0.9% | 6/9 | +1.2% | 5/7 |
-| Good business, value unclear | 395 | 39.5 | 16.8% | +3.0% | 7/10 | +1.4 | +3.2% | 8/9 | +3.6% | 6/7 |
-| No | 1812 | 181.2 | 12.7% | -1.1% | 4/10 | -1.2 | -1.3% | 2/9 | -1.7% | 0/7 |
-| Insufficient data | 162 | 16.2 | 14.8% | +1.1% | 4/10 | +0.6 | -0.4% | 4/9 | +2.0% | 5/7 |
+| Good business, fair price | 53 | 5.3 | 15.8% | +2.1% | 3/10 | +0.4 | +0.2% | 5/9 | -0.1% | 4/7 |
+| Statistically cheap only | 54 | 5.4 | 18.6% | +4.8% | 6/10 | +1.2 | +0.6% | 4/9 | -2.4% | 4/7 |
+| Good business, dear | 1316 | 131.6 | 14.2% | +0.5% | 5/10 | +0.4 | +0.9% | 6/9 | +1.2% | 5/7 |
+| Good business, value unclear | 377 | 37.7 | 17.0% | +3.3% | 7/10 | +1.4 | +3.5% | 8/9 | +3.9% | 7/7 |
+| No | 1807 | 180.7 | 12.6% | -1.2% | 4/10 | -1.3 | -1.5% | 2/9 | -1.8% | 0/7 |
+| Insufficient data | 151 | 15.1 | 15.0% | +1.2% | 5/10 | +0.6 | +0.4% | 5/9 | +2.4% | 5/7 |
 
 Universe: 385 companies a year, 13.7% a year over one year. Price-to-value
-quintiles on this universe: cheapest minus dearest -2.0% a year over one
-year (t = -0.5), -1.3% over three, -1.8% over five; rank correlation -0.03.
+quintiles on this universe: cheapest minus dearest -0.9% a year over one
+year (t = -0.2), -1.1% over three, -2.3% over five; rank correlation -0.01.
 The conclusions do not change.
 
 ## What else is not point in time
 
-- **The configuration.** Config r7 was written in 2026. Its thresholds were
+- **The configuration.** Config r8 was written in 2026. Its thresholds were
   set by reading Graham and Buffett and its data repairs by finding XBRL
   traps, not by fitting returns - but a 2014 version of the tracker would not
   have known about the traps the later ones fixed.
