@@ -841,21 +841,23 @@ def test_partial_cik_map_never_replaces_a_complete_one():
     from datetime import datetime, timedelta, timezone
     from valuation import sources as SRC
     with tempfile.TemporaryDirectory() as d:
-        old = (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_ticker_map, SRC._index_table_ciks)
+        old = (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_current_map,
+               SRC._sec_ticker_map, SRC._index_table_ciks)
         SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH = Path(d) / 'cik.json', Path(d) / 'none.json'
         full = {f'T{i}': i for i in range(6000)}
         SRC.CIK_MAP_PATH.write_text(json.dumps({
             'fetched': (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(),
             'complete': True, 'map': full}))
-        SRC._sec_ticker_map = lambda verbose: {}
+        SRC._sec_current_map = SRC._sec_ticker_map = lambda verbose: {}
         SRC._index_table_ciks = lambda verbose: {'NEWCO': 99999, 'T1': 5}
         try:
             m = SRC.load_cik_map(verbose=False)
-            assert m['T5999'] == 5999 and m['NEWCO'] == 99999 and m['T1'] == 1
+            # T1: an index constituent, whose table's CIK wins (config r9).
+            assert m['T5999'] == 5999 and m['NEWCO'] == 99999 and m['T1'] == 5
             kept = json.loads(SRC.CIK_MAP_PATH.read_text())
             assert kept['complete'] and len(kept['map']) == 6000, 'partial map overwrote it'
         finally:
-            (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH,
+            (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_current_map,
              SRC._sec_ticker_map, SRC._index_table_ciks) = old
     print('  cik map: a partial fallback adds to the complete map, never replaces it')
 
@@ -863,7 +865,7 @@ def test_partial_cik_map_never_replaces_a_complete_one():
 def test_funds_are_declined_by_entity_type():
     from valuation import sources as SRC
     old = (SRC.resolve_ciks, SRC.fetch_submissions, SRC.fetch_companyfacts)
-    SRC.resolve_ciks = lambda tickers, verbose=True: ({'SPY': 884394}, [])
+    SRC.resolve_ciks = lambda tickers, verbose=True, cfg=None: ({'SPY': 884394}, [])
     SRC.fetch_submissions = lambda cik, cfg, force=False: {'entityType': 'other', 'name': 'SPDR'}
     SRC.fetch_companyfacts = lambda *a, **k: (_ for _ in ()).throw(AssertionError('fetched'))
     try:
@@ -1474,6 +1476,286 @@ def test_price_age_is_measured_from_the_as_of_day():
     r = S.evaluate('X', p, info, prices, MACRO, CFG)
     assert r['price_stale_days'] == (pd.Timestamp.today().normalize() - last).days
     print('  point in time: price age from the as-of day')
+
+
+def test_a_backtest_day_before_a_spin_off_is_priced_as_it_traded():
+    """Yahoo divides every close before a spin-off by its ratio; the filings
+    of the day were never restated for it. A backtest day's own close is one
+    of those closes, and must be put back - a live run's last close never
+    precedes a spin-off, so it is untouched."""
+    p, info, prices = synthetic_company()
+    last = float(prices['Close'].iloc[-1])
+    later = (prices.index[-1] + pd.Timedelta(days=400)).strftime('%Y-%m-%d')
+    spun = dict(info, spinoffs=[{'date': later, 'ratio': 1.25}])
+    r = S.evaluate('X', p, spun, prices, MACRO, CFG, as_of=prices.index[-1])
+    assert abs(r['price'] - last * 1.25) < 1e-9, (r['price'], last)
+    earlier = prices.index[len(prices) // 2].strftime('%Y-%m-%d')
+    r = S.evaluate('X', p, dict(info, spinoffs=[{'date': earlier, 'ratio': 1.25}]),
+                   prices, MACRO, CFG)
+    assert abs(r['price'] - last) < 1e-9, (r['price'], last)
+    print('  point in time: a close before a later spin-off is put back as traded')
+
+
+# ---------------------------------------------------------------------------
+# Found by the point-in-time backtest (2026-11-10, config r9)
+# ---------------------------------------------------------------------------
+
+def _weighted_count_filer(counts: dict, eps: dict, event: str, restated_by: float):
+    """Annual reports for FY2017-24, each filed the next 20 February with three
+    years of weighted diluted share counts, EPS and net income. A report filed
+    on or after `event` states every year on the basis after it - its counts
+    times `restated_by`: the ratio for a split, which ASC 260 restates in every
+    year shown, and 1.0 for a spin-off, which moves no share count."""
+    shares, per_share, income = [], [], []
+    for fy in range(2017, 2025):
+        filed = f'{fy + 1}-02-20'
+        k = restated_by if filed >= event else 1.0
+        for y in (fy - 2, fy - 1, fy):
+            s, e = f'{y}-01-01', f'{y}-12-31'
+            shares.append(dur(s, e, counts[y] * k, filed))
+            per_share.append(dur(s, e, round(eps[y] / k, 6), filed))
+            income.append(dur(s, e, eps[y] * counts[y], filed))
+    return facts_doc({'WeightedAverageNumberOfDilutedSharesOutstanding': {'shares': shares},
+                      'EarningsPerShareDiluted': {'USD/shares': per_share},
+                      'NetIncomeLoss': {'USD': income}})
+
+
+def test_spin_offs_are_not_restated_as_splits():
+    """Yahoo books a spin-off as a split of the price ratio across it: AT&T
+    1.324 for Warner Bros. Discovery on 2022-04-11. Restated as a split, AT&T's
+    FY2019 diluted count read 9,729m against 7,348m filed - a 23% buyback into
+    FY2020 that never happened - and GE's and 3M's EPS was deflated for eight
+    years. The filer's own restated counts tell a split from a spin-off; with
+    no report filed since the event, the ratio decides."""
+    counts = dict(zip(range(2015, 2025), np.array(
+        [6168, 6189, 6183, 6806, 7348, 7466, 7241, 7174, 7238, 7192]) * 1e6))
+    eps = dict(zip(range(2015, 2025), [2.37, 2.10, 4.76, 2.85, 1.89, -0.75, 2.76, -1.13, 1.97, 1.49]))
+    day = '2022-04-11'
+
+    def build(ratio, restated_by, event=day):
+        splits = pd.Series([ratio], index=pd.DatetimeIndex([event]))
+        return F.build_panel('T', _weighted_count_filer(counts, eps, event, restated_by),
+                             {'sic': '4813'}, CFG, splits=splits)
+
+    p, info = build(1.324, 1.0)
+    assert p.loc['2019-12-31', 'shares_used'] == 7348e6, p['shares_used'].to_dict()
+    assert p.loc['2019-12-31', 'eps'] == 1.89 and info['splits']['n_adjusted'] == 0
+    assert info['spinoffs'] == [{'date': day, 'ratio': 1.324}] and info['split_dates'] == []
+
+    p, info = build(2.0, 2.0)                              # a 2-for-1 split, restated
+    assert p.loc['2019-12-31', 'shares_used'] == 2 * 7348e6       # filed only before it
+    assert p.loc['2020-12-31', 'shares_used'] == 2 * 7466e6       # restated by the filer
+    assert info['split_dates'] == [day] and info['spinoffs'] == []
+    # Brown-Forman's 5-for-4 (2018): no clean ratio, but the filings confirm it.
+    assert build(1.25, 1.25)[0].loc['2019-12-31', 'shares_used'] == 1.25 * 7348e6
+    # Hilton (2017): a 1-for-3 reverse split and two spin-offs, booked as one 0.4873.
+    p, info = build(0.4873, 1 / 3)
+    assert abs(p.loc['2019-12-31', 'shares_used'] - 7348e6 / 3) < 1
+    assert info['split_dates'] == [day] and abs(info['spinoffs'][0]['ratio'] - 3 * 0.4873) < 1e-12
+    # Nothing filed since: GE HealthCare's 1.281 is no split, a 3-for-1 is.
+    late = '2025-06-02'
+    assert build(1.281, 1.0, late)[0].loc['2019-12-31', 'shares_used'] == 7348e6
+    assert build(3.0, 1.0, late)[0].loc['2019-12-31', 'shares_used'] == 3 * 7348e6
+    # ConocoPhillips filed its counts in thousands from 2010: twelve of its
+    # sixteen restated counts across the 2012 Phillips 66 spin-off are a
+    # thousandfold off. A unit error is not a 1-for-1000 reverse split.
+    assert F._share_basis_change(1.311791, [0.001] * 12 + [1.0] * 4)[0] == 1.0
+    print('  splits: a spin-off keeps the filed counts; a split, confirmed or clean, restates them')
+
+
+def test_spin_off_prices_meet_the_filings_as_traded():
+    """Yahoo divides every close before a spin-off by its ratio: 3M's last
+    close before Solventum, 106.07, reads 88.69 (/1.196). With the filings no
+    longer restated by the ratio, a P/E or a market value from before the
+    spin-off must take the close as traded, or it reads 1.196 times too low."""
+    p, info, traded = synthetic_company()
+    day = p.index[-1] + pd.Timedelta(days=60)      # after the last fiscal year, before today
+    yahoo = traded.copy()
+    yahoo.loc[yahoo.index < day, 'Close'] /= 1.196
+    spun = dict(info, spinoffs=[{'date': f'{day:%Y-%m-%d}', 'ratio': 1.196}])
+    want = S.evaluate('TEST', p, info, traded, MACRO, CFG)
+    got = S.evaluate('TEST', p, spun, yahoo, MACRO, CFG)
+    assert want['pe_5yr_high'] and abs(got['pe_5yr_high'] / want['pe_5yr_high'] - 1) < 1e-9
+    mv0, mv1 = want['info']['market_value_change'], got['info']['market_value_change']
+    assert mv0 and abs(mv1 / mv0 - 1) < 1e-9, (mv0, mv1)
+    assert got['price'] == want['price']
+    blind = S.evaluate('TEST', p, info, yahoo, MACRO, CFG)
+    assert blind['pe_5yr_high'] < want['pe_5yr_high'] / 1.1
+    print(f'  spin-off prices: 5y P/E high {got["pe_5yr_high"]:.1f}, as traded '
+          f'(Yahoo\'s closes alone: {blind["pe_5yr_high"]:.1f})')
+
+
+def test_index_table_cik_wins_for_its_constituents():
+    """SEC's ticker file follows the symbol and lags when one changes hands: in
+    November 2026 it sent BNY to a BlackRock municipal bond fund and DOC to
+    Physicians Realty, whose ticker Healthpeak took in 2024 - a local run
+    valued Healthpeak's price against Physicians Realty's filings. The index
+    table names each constituent's own registrant."""
+    from datetime import datetime, timedelta, timezone
+    from valuation import sources as SRC
+    sec = {**{f'T{i}': i for i in range(6000)}, 'BNY': 1137390, 'DOC': 1574540, 'BLK': 1364742}
+    index = {'BNY': 1390777, 'DOC': 765880, 'BLK': 2012383, 'T7': 7}
+
+    def refetch(verbose):
+        raise AssertionError('a current map was fetched again')
+
+    with tempfile.TemporaryDirectory() as d:
+        old = (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_current_map,
+               SRC._sec_ticker_map, SRC._index_table_ciks)
+        SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH = Path(d) / 'cik.json', Path(d) / 'over.json'
+        # Complete and a day old, but cached before the rule: rebuilt, not kept.
+        SRC.CIK_MAP_PATH.write_text(json.dumps({
+            'fetched': (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+            'complete': True, 'map': sec}))
+        SRC._sec_current_map = lambda verbose: {}            # no contact: refused
+        SRC._sec_ticker_map, SRC._index_table_ciks = (lambda verbose: dict(sec)), (lambda verbose: dict(index))
+        try:
+            m = SRC.load_cik_map(verbose=False)
+            assert (m['BNY'], m['DOC'], m['BLK'], m['T7'], m['T8']) == (1390777, 765880, 2012383, 7, 8)
+            cache = SRC._read_cik_cache()
+            assert cache.index_ciks == index and not cache.current, 'provenance not kept'
+            SRC._sec_current_map = SRC._sec_ticker_map = SRC._index_table_ciks = refetch
+            assert SRC.load_cik_map(verbose=False)['DOC'] == 765880
+            SRC.CIK_OVERRIDE_PATH.write_text(json.dumps({'BNY': 42}))
+            assert SRC.load_cik_map(verbose=False)['BNY'] == 42, 'an override lost its last word'
+        finally:
+            (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC._sec_current_map,
+             SRC._sec_ticker_map, SRC._index_table_ciks) = old
+    # The new registrations the index points at carry their predecessors.
+    assert SRC.cik_family(1364742) == [2012383, 1364742]          # BlackRock
+    assert SRC.cik_family(1996862) == [1996862, 1144519]          # Bunge
+    assert SRC.cik_family(1832433) == [2011641, 1832433]          # Ferguson
+    assert SRC.cik_family(813828) == [2041610, 813828]            # Paramount Skydance
+    print('  cik map: the index table decides its constituents; an override still wins')
+
+
+def test_a_predecessor_counts_only_until_its_successor_reports():
+    """The old registrant often keeps filing as a subsidiary - Apache, Baker
+    Hughes Holdings and Apollo Asset Management did for years. Merged whole,
+    its later 10-K won latest-filed-wins over the parent's own figures, and its
+    cover page - a thousand shares, all held by the parent - became the
+    company's share count."""
+    from valuation import sources as SRC
+
+    def cover(val, filed):
+        return {'end': filed, 'val': val, 'filed': filed, 'form': '10-K'}
+
+    old = facts_doc({'NetIncomeLoss': {'USD': [
+        dur('2021-01-01', '2021-12-31', 5.9e9, '2022-02-25'),
+        dur('2022-01-01', '2022-12-31', 5.2e9, '2023-02-24'),
+        dur('2023-01-01', '2023-12-31', 5.5e9, '2024-02-23'),
+        dur('2024-01-01', '2024-12-31', 4.1e9, '2025-03-14')]}},       # as a subsidiary
+        dei={'EntityCommonStockSharesOutstanding': {'shares': [
+            cover(148e6, '2024-02-23'), cover(1000, '2025-03-14')]}})
+    new = facts_doc({'NetIncomeLoss': {'USD': [
+        dur('2023-01-01', '2023-12-31', 5.5e9, '2025-02-25'),
+        dur('2024-01-01', '2024-12-31', 6.4e9, '2025-02-25')]}},
+        dei={'EntityCommonStockSharesOutstanding': {'shares': [cover(155e6, '2025-02-25')]}})
+    panel, info = F.build_panel('BLK', SRC.merge_facts([new, old]), {'sic': '6211'}, CFG,
+                                splits=pd.Series(dtype=float))
+    assert list(panel['net_income']) == [5.9e9, 5.2e9, 5.5e9, 6.4e9], list(panel['net_income'])
+    assert info['cover_shares'] == 155e6, info['cover_shares']
+    assert SRC.first_annual_report(new) == '2025-02-25'
+    # A successor with no annual report yet cuts nothing: ExxonMobil's Texas
+    # holding company had filed one 10-Q.
+    q = facts_doc({'NetIncomeLoss': {'USD': [
+        dur('2026-01-01', '2026-03-31', 7.7e9, '2026-05-01', form='10-Q')]}})
+    assert SRC.first_annual_report(q) is None
+    assert len(SRC.merge_facts([q, old])['facts']['us-gaap']['NetIncomeLoss']['units']['USD']) == 5
+    print('  successions: a predecessor counts until its successor\'s first annual report')
+
+
+def test_tickers_are_confirmed_by_their_filers():
+    """SEC's ticker.txt stopped changing in September 2022, and the file it
+    maintains is refused without a contact. Outside the index tables, a ticker
+    that changed hands since kept pointing at its old holder - BNY at a
+    BlackRock municipal fund, DOC at Physicians Realty - and a newer listing
+    had no CIK at all. Each ticker is now confirmed by its filer's own record
+    and, failing that, looked up in EDGAR's company search."""
+    from datetime import datetime, timedelta, timezone
+    from valuation import sources as SRC
+    records = {21344: ['KO'], 1137390: [], 1574540: [], 555: ['GONE2'], 777: ['IDX2'],
+               1390777: ['BNY', 'BNY-PK'], 765880: ['DOC'], 4242: ['NEWCO']}
+    found_by_search = {'BNY': 1390777, 'DOC': 765880, 'NEWCO': 4242}
+    asked = []
+
+    def search(ticker):
+        asked.append(ticker)
+        return found_by_search.get(ticker), ticker != 'DOWN'
+
+    with tempfile.TemporaryDirectory() as d:
+        old = (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC.CIK_SEARCH_PATH,
+               SRC.fetch_submissions, SRC._search_ticker)
+        SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH = Path(d) / 'cik.json', Path(d) / 'over.json'
+        SRC.CIK_SEARCH_PATH = Path(d) / 'search.json'
+        SRC.CIK_MAP_PATH.write_text(json.dumps({
+            'fetched': (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+            'complete': True, 'index_first': True, 'current': False, 'index': {'IDX': 777},
+            'map': {**{f'T{i}': i for i in range(6000)}, 'BNY': 1137390, 'DOC': 1574540,
+                    'KO': 21344, 'GONE': 555, 'IDX': 777, 'OVR': 888}}))
+        SRC.CIK_OVERRIDE_PATH.write_text(json.dumps({'OVR': 999}))
+        SRC.fetch_submissions = lambda cik, cfg, force=False: {'tickers': records.get(cik, [])}
+        SRC._search_ticker = search
+        try:
+            want = ['BNY', 'DOC', 'KO', 'GONE', 'IDX', 'OVR', 'NEWCO', 'NOPE']
+            found, missing = SRC.resolve_ciks(want, verbose=False, cfg=CFG)
+            assert found == {'BNY': 1390777, 'DOC': 765880, 'KO': 21344, 'IDX': 777,
+                             'OVR': 999, 'NEWCO': 4242}, found
+            # GONE: only the frozen file named it. IDX: an index table did - kept.
+            assert missing == ['GONE', 'NOPE'], missing
+            assert sorted(asked) == ['BNY', 'DOC', 'GONE', 'IDX', 'NEWCO', 'NOPE'], asked
+            n = len(asked)
+            assert SRC.resolve_ciks(want, verbose=False, cfg=CFG) == (found, missing)
+            assert len(asked) == n, 'answers were not remembered'
+            SRC.resolve_ciks(['DOWN'], verbose=False, cfg=CFG)
+            SRC.resolve_ciks(['DOWN'], verbose=False, cfg=CFG)
+            assert asked.count('DOWN') == 2, 'a failed search was remembered as "no such ticker"'
+            # Without a configuration (the share-class refresh), nothing is checked.
+            assert SRC.resolve_ciks(['BNY'], verbose=False)[0] == {'BNY': 1137390}
+        finally:
+            (SRC.CIK_MAP_PATH, SRC.CIK_OVERRIDE_PATH, SRC.CIK_SEARCH_PATH,
+             SRC.fetch_submissions, SRC._search_ticker) = old
+    print('  tickers: confirmed by the filer, else found by EDGAR\'s search, else left out')
+
+
+def test_edgar_search_and_secs_maintained_file_are_read_exactly():
+    """EDGAR's search for "BNY" ranks BNY Mellon's municipal funds beside the
+    bank; only a hit that lists the ticker itself is taken."""
+    from valuation import sources as SRC
+
+    class Reply:
+        def __init__(self, body, status=200):
+            self.body, self.status_code = body, status
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f'{self.status_code} Forbidden')
+
+        def json(self):
+            return self.body
+
+    hits = {'hits': {'hits': [
+        {'_id': '818972', '_source': {'entity': 'BNY MELLON STRATEGIC MUNICIPALS, INC. (LEO)',
+                                      'tickers': 'LEO'}},
+        {'_id': '2052410', '_source': {'entity': 'BNY HOLDINGS'}},
+        {'_id': '1390777', '_source': {'entity': 'Bank of New York Mellon Corp (BNY, BNY-PK)',
+                                       'tickers': 'BNY, BNY-PK'}}]}}
+    tickers_json = {'0': {'cik_str': 1390777, 'ticker': 'BNY', 'title': 'BNY'},
+                    '1': {'cik_str': 1067983, 'ticker': 'BRK.B', 'title': 'Berkshire'}}
+    old = SRC._sec_get
+    try:
+        SRC._sec_get = lambda url, timeout, pause=0.12: Reply(hits)
+        assert SRC._search_ticker('BNY') == (1390777, True)
+        assert SRC._search_ticker('BNY-PK') == (1390777, True)
+        assert SRC._search_ticker('BN') == (None, True)
+        SRC._sec_get = lambda url, timeout, pause=0.12: Reply(tickers_json)
+        assert SRC._sec_current_map(verbose=False) == {'BNY': 1390777, 'BRK-B': 1067983}
+        SRC._sec_get = lambda url, timeout, pause=0.12: Reply({}, 403)    # no contact
+        assert SRC._search_ticker('BNY') == (None, False)
+        assert SRC._sec_current_map(verbose=False) == {}
+    finally:
+        SRC._sec_get = old
+    print('  EDGAR search: an exact ticker only; a refusal is not "not found"')
 
 
 if __name__ == '__main__':

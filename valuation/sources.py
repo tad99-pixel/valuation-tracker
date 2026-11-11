@@ -38,6 +38,8 @@ import time
 import warnings
 from datetime import datetime, timedelta, timezone
 from io import StringIO
+from typing import NamedTuple
+from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -53,7 +55,12 @@ warnings.filterwarnings('ignore')
 UA = {'User-Agent': os.environ.get('VALUATION_USER_AGENT')
       or 'ValuationTracker/1.0 (non-commercial research script)'}
 
+# SEC's maintained ticker file, served only to a User-Agent with a contact; and
+# the old one, served to anyone but unchanged since September 2022.
+SEC_TICKER_JSON = 'https://www.sec.gov/files/company_tickers.json'
 SEC_TICKER_TXT = 'https://www.sec.gov/include/ticker.txt'
+# EDGAR's company search: current to the day, and served without a contact.
+SEC_COMPANY_SEARCH = 'https://efts.sec.gov/LATEST/search-index?keysTyped={ticker}'
 SEC_FACTS = 'https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json'
 SEC_SUBMISSIONS = 'https://data.sec.gov/submissions/CIK{cik:010d}.json'
 FRED_CSV = 'https://fred.stlouisfed.org/graph/fredgraph.csv'
@@ -68,6 +75,11 @@ CIK_MAP_PATH = STATE_DIR / 'cik_map.json'
 # EDGAR maps to a holding company with no XBRL, or a dual-listing whose
 # filings sit under the other line, is fixed here rather than in code.
 CIK_OVERRIDE_PATH = STATE_DIR / 'cik_overrides.json'
+# What EDGAR's company search answered for a ticker its filer did not confirm.
+CIK_SEARCH_PATH = STATE_DIR / 'cik_search.json'
+# A found CIK is trusted as long as the map; a ticker not found is asked again
+# the next day.
+SEARCH_HIT_DAYS, SEARCH_MISS_DAYS = 14, 1
 
 _last_sec_call = [0.0]
 
@@ -119,22 +131,60 @@ def _norm_ticker(t: str) -> str:
     return str(t).strip().upper().replace('.', '-')
 
 
+class CikCache(NamedTuple):
+    """The cached ticker map, as `_read_cik_cache` reads it."""
+    ciks: dict          # {TICKER: cik}, index tables included, overrides not
+    fetched: datetime
+    complete: bool      # covers the market (an SEC file), not the index tables alone
+    index_first: bool   # built with the index tables' CIKs preferred (config r9)
+    current: bool       # from SEC's maintained file rather than the frozen ticker.txt
+    index_ciks: dict    # the index tables' own CIKs
+
+
 def _read_cik_cache():
-    """``(map, fetched, complete)`` from disk, or None."""
+    """The cached map (`CikCache`), or None.
+
+    A map built before the index tables were preferred for their
+    constituents (no `index_first` mark) is rebuilt on its next load."""
     blob = _read_json(CIK_MAP_PATH, None)
     if not blob:
         return None
     try:
         m = {k: int(v) for k, v in blob['map'].items()}
         fetched = datetime.fromisoformat(blob['fetched'])
+        index = {k: int(v) for k, v in (blob.get('index') or {}).items()}
     except Exception:  # noqa: BLE001
         return None
     # A map written before the flag existed came from ticker.txt if it is that
     # large; the index-table fallback tops out near 1,100 names.
-    return m, fetched, bool(blob.get('complete', len(m) > 5000))
+    return CikCache(m, fetched, bool(blob.get('complete', len(m) > 5000)),
+                    bool(blob.get('index_first', False)), bool(blob.get('current', False)),
+                    index)
+
+
+def _sec_current_map(verbose: bool) -> dict:
+    """{TICKER: cik} from SEC's maintained `company_tickers.json`, or {}.
+
+    SEC serves it only to a User-Agent with a contact (`VALUATION_USER_AGENT`);
+    without one it answers 403, and the frozen ticker.txt is read instead."""
+    try:
+        r = _sec_get(SEC_TICKER_JSON, timeout=30)
+        r.raise_for_status()
+        out = {_norm_ticker(v['ticker']): int(v['cik_str']) for v in r.json().values()
+               if v.get('ticker') and str(v.get('cik_str', '')).isdigit()}
+    except Exception as exc:  # noqa: BLE001
+        if verbose:
+            print(f'  cik map: SEC\'s maintained ticker file unavailable ({exc}) - it needs a '
+                  'contact in VALUATION_USER_AGENT; reading ticker.txt, frozen since 2022-09')
+        return {}
+    if verbose:
+        print(f'  cik map: {len(out)} tickers from SEC company_tickers.json')
+    return out
 
 
 def _sec_ticker_map(verbose: bool) -> dict:
+    """{TICKER: cik} from SEC's ticker.txt, which has not changed since
+    September 2022: see `confirm_ciks` for what that costs and how it is caught."""
     out = {}
     try:
         r = _sec_get(SEC_TICKER_TXT, timeout=30)
@@ -213,70 +263,196 @@ def index_constituents(name: str, refresh_days: int = 7, verbose: bool = True) -
 def load_cik_map(refresh_days: int = 14, verbose: bool = True, force: bool = False) -> dict:
     """Return {TICKER: cik}, cached on disk.
 
-    `include/ticker.txt` is the full official map and the only route here that
-    covers the whole market. `files/company_tickers.json` returns 403 from some
-    networks, so the Wikipedia index tables - which carry a CIK column for the
-    S&P 500 and S&P 600 - are kept as a partial fallback.
+    SEC's two ticker files are the only routes here that cover the whole
+    market. `files/company_tickers.json` is maintained, but SEC serves it only
+    to a User-Agent with a contact; `include/ticker.txt` is served to anyone
+    but has not changed since September 2022 (its Last-Modified date), so a
+    ticker that changed hands since points at its old holder: in November
+    2026 it sent BNY to a BlackRock municipal bond fund (BNY Mellon, 1390777,
+    is still listed under BK) and DOC to Physicians Realty, whose ticker
+    Healthpeak (765880) took in 2024. A newer listing - GE HealthCare,
+    Solventum, Veralto - is not in it at all. The maintained file is read when
+    it is served, the old one otherwise, and `resolve_ciks` has each ticker
+    confirmed by its filer's own record (`confirm_ciks`).
 
-    The cache records whether it is complete (the SEC file) or partial (the
-    index tables), and a partial map never replaces a complete one. It used
-    to: one afternoon with ticker.txt unreachable overwrote ten thousand
-    tickers with eleven hundred, and every company outside the two indexes
-    read "no CIK" for the next fortnight.
+    The Wikipedia index tables carry a CIK column for the S&P 500 and S&P
+    600; for their own constituents that CIK wins, and where SEC's files are
+    unreachable (GitHub's servers) they are the map. The cache records whether
+    it is complete (an SEC file) or partial (the index tables), and a partial
+    map never replaces a complete one. It used to: one afternoon with
+    ticker.txt unreachable overwrote ten thousand tickers with eleven hundred,
+    and every company outside the two indexes read "no CIK" for the next
+    fortnight.
     """
     cache = _read_cik_cache()
     now = datetime.now(timezone.utc)
-    if cache and not force and cache[2] and now - cache[1] < timedelta(days=refresh_days):
-        return _with_overrides(cache[0])
+    if (cache and not force and cache.complete and cache.index_first
+            and now - cache.fetched < timedelta(days=refresh_days)):
+        return _with_overrides(cache.ciks)
 
-    out = _sec_ticker_map(verbose)
-    complete = len(out) >= 1000
-    if not complete:
-        for k, v in _index_table_ciks(verbose).items():
-            out.setdefault(k, v)
+    current = _sec_current_map(verbose)
+    sec = current or _sec_ticker_map(verbose)
+    complete = len(sec) >= 1000
+    index = _index_table_ciks(verbose)
+    moved = sorted(t for t, c in index.items() if t in sec and sec[t] != c)
+    if verbose and moved:
+        print(f'  cik map: the index tables override SEC\'s ticker file for {len(moved)}: '
+              + ', '.join(f'{t} {sec[t]}->{index[t]}' for t in moved[:8])
+              + (' ...' if len(moved) > 8 else ''))
+    out = {**sec, **index}
 
-    if not complete and cache and cache[2]:
+    if not complete and cache and cache.complete:
         if verbose:
-            print('  cik map: keeping the complete cached map; the partial one only adds to it')
-        return _with_overrides({**out, **cache[0]})
+            print('  cik map: keeping the complete cached map; the partial one only adds to '
+                  'it, and the index tables still decide their own constituents')
+        return _with_overrides({**out, **cache.ciks, **index})
     if not out:
         if cache:
             if verbose:
                 print('  cik map: all sources failed; using the stale cached map')
-            return _with_overrides(cache[0])
+            return _with_overrides(cache.ciks)
         raise RuntimeError(
             'Could not build a ticker -> CIK map from SEC ticker.txt or the '
             'index tables. Fundamentals cannot be fetched without it. Check '
             f'connectivity, or write a map by hand to {CIK_OVERRIDE_PATH}.')
-    _write_json(CIK_MAP_PATH, {'fetched': now.isoformat(), 'complete': complete, 'map': out})
+    # Built without the index tables (unreachable), it is rebuilt next time.
+    _write_json(CIK_MAP_PATH, {'fetched': now.isoformat(), 'complete': complete,
+                               'index_first': bool(index), 'current': bool(current),
+                               'index': index, 'map': out})
     return _with_overrides(out)
 
 
+def _read_overrides() -> dict:
+    if not CIK_OVERRIDE_PATH.exists():
+        return {}
+    try:
+        return {_norm_ticker(k): int(v) for k, v in json.loads(CIK_OVERRIDE_PATH.read_text()).items()}
+    except Exception as exc:  # noqa: BLE001
+        print(f'  cik overrides unreadable ({exc}); ignored')
+        return {}
+
+
 def _with_overrides(m: dict) -> dict:
-    if CIK_OVERRIDE_PATH.exists():
-        try:
-            ov = json.loads(CIK_OVERRIDE_PATH.read_text())
-            m = {**m, **{_norm_ticker(k): int(v) for k, v in ov.items()}}
-        except Exception as exc:  # noqa: BLE001
-            print(f'  cik overrides unreadable ({exc}); ignored')
-    return m
+    return {**m, **_read_overrides()}
 
 
-def resolve_ciks(tickers, verbose: bool = True) -> tuple:
+def resolve_ciks(tickers, verbose: bool = True, cfg: ValuationConfig | None = None) -> tuple:
     """Split `tickers` into {ticker: cik} and a list of unresolved ones.
 
     A ticker missing from a cached map is usually a listing or a ticker
     change newer than the map, so a miss refreshes it - at most once a day,
     so a ticker that genuinely has no CIK does not cost a download per run.
+    With `cfg`, every ticker is also confirmed by its filer (`confirm_ciks`).
     """
     want = list(dict.fromkeys(_norm_ticker(t) for t in tickers))
     m = load_cik_map(verbose=verbose)
     if any(k not in m for k in want):
         cache = _read_cik_cache()
-        if cache is None or datetime.now(timezone.utc) - cache[1] > timedelta(days=1):
+        if cache is None or datetime.now(timezone.utc) - cache.fetched > timedelta(days=1):
             m = load_cik_map(verbose=verbose, force=True)
     found = {k: m[k] for k in want if k in m}
-    return found, [k for k in want if k not in m]
+    if cfg is not None:
+        found = confirm_ciks(want, found, cfg, verbose=verbose)
+    return found, [k for k in want if k not in found]
+
+
+def _lists_ticker(meta, ticker: str) -> bool:
+    """Does a filer's submissions record list `ticker` among its tickers now?"""
+    return ticker in {_norm_ticker(x) for x in (meta or {}).get('tickers') or []}
+
+
+def _search_ticker(ticker: str) -> tuple:
+    """``(cik or None, answered)``: the filer EDGAR's company search lists
+    under exactly `ticker`. A search hit lists its tickers ("BNY, BNY-PK"),
+    and a near miss - BNY Mellon's municipal funds, under "BNY" - is not
+    taken. `answered` is False when the search itself failed, which is not
+    remembered as "no such ticker"."""
+    try:
+        r = _sec_get(SEC_COMPANY_SEARCH.format(ticker=quote(ticker)), timeout=30)
+        r.raise_for_status()
+        hits = (r.json().get('hits') or {}).get('hits') or []
+    except Exception:  # noqa: BLE001 - network, refusal, parse
+        return None, False
+    for h in hits:
+        listed = {_norm_ticker(x) for x in str((h.get('_source') or {}).get('tickers') or '').split(',')
+                  if x.strip()}
+        if ticker in listed:
+            try:
+                return int(h['_id']), True
+            except (KeyError, TypeError, ValueError):
+                continue
+    return None, True
+
+
+def _searched_cik(ticker: str, memo: dict):
+    """`_search_ticker` through `memo` (the CIK_SEARCH_PATH file): a found
+    CIK is kept for `SEARCH_HIT_DAYS`, a miss for `SEARCH_MISS_DAYS`."""
+    rec, now = memo.get(ticker), time.time()
+    if rec is not None and now - float(rec.get('at', 0)) < 86400 * (
+            SEARCH_HIT_DAYS if rec.get('cik') else SEARCH_MISS_DAYS):
+        return rec.get('cik')
+    cik, answered = _search_ticker(ticker)
+    if answered:
+        memo[ticker] = {'cik': cik, 'at': now}
+    return cik
+
+
+def confirm_ciks(want: list, found: dict, cfg: ValuationConfig, verbose: bool = True) -> dict:
+    """`found`, each ticker confirmed by its filer, and the rest looked up.
+
+    A filer's submissions record - the filing index every run reads anyway,
+    from data.sec.gov, which needs no contact - lists the tickers it trades
+    under now; all 503 of the S&P 500 list their own. A ticker whose filer
+    does not, or one the map lacks, is looked up in EDGAR's company search,
+    which is current and served without a contact, unlike SEC's maintained
+    ticker file. What neither confirms is dropped if only SEC's frozen
+    ticker.txt named it, and kept, with a warning, if an index table or SEC's
+    maintained file did. A hand-made override is never second-guessed, and a
+    filer whose record cannot be fetched is left as mapped.
+    """
+    overrides = _read_overrides()
+    cache = _read_cik_cache()
+    index = cache.index_ciks if cache else {}
+    frozen = not (cache and cache.current)
+    memo = _read_json(CIK_SEARCH_PATH, {})
+    out, fixed, dropped, doubted = {}, [], [], []
+    for i, t in enumerate(want, 1):
+        if verbose and i % 100 == 0:
+            print(f'    confirming tickers {i}/{len(want)}', end='\r')
+        cik = found.get(t)
+        if cik is not None:
+            if t in overrides:
+                out[t] = cik
+                continue
+            meta = fetch_submissions(cik_family(cik)[0], cfg)
+            if meta is None or _lists_ticker(meta, t):
+                out[t] = cik
+                continue
+        hit = _searched_cik(t, memo)
+        if hit is not None:
+            out[t] = hit
+            if hit != cik:
+                fixed.append(f'{t} {cik if cik is not None else "(none)"}->{hit}')
+        elif cik is not None and (t in index or not frozen):
+            out[t] = cik
+            doubted.append(t)
+        elif cik is not None:
+            dropped.append(f'{t} (CIK {cik})')
+    if memo:
+        _write_json(CIK_SEARCH_PATH, memo)
+    if verbose:
+        print(' ' * 40, end='\r')
+        if fixed:
+            print(f'  cik map: EDGAR\'s company search placed {len(fixed)} ticker(s) the map had '
+                  f'wrong or lacked: {", ".join(fixed[:8])}' + (' ...' if len(fixed) > 8 else ''))
+        if doubted:
+            print(f'  cik map: kept {len(doubted)} CIK(s) that neither the filer\'s record nor '
+                  f'EDGAR\'s search confirms: {", ".join(doubted[:8])}')
+        if dropped:
+            print(f'  cik map: {len(dropped)} ticker(s) left out - SEC\'s frozen ticker file '
+                  f'names a filer that no longer trades under them, and no current one was found: '
+                  f'{", ".join(dropped[:8])}; set a CIK in {CIK_OVERRIDE_PATH.name}')
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -390,22 +566,56 @@ def cik_family(cik: int) -> list:
     return [cik]
 
 
+# The reports whose first appearance under a new registration means it has
+# taken over as the company's filer. Originals: an amendment never comes first.
+ANNUAL_REPORT_FORMS = frozenset({'10-K', '10-KT', '20-F', '40-F'})
+
+
+def first_annual_report(doc: dict):
+    """The filing date (ISO) of the first annual report in a companyfacts
+    document, or None if it holds none yet."""
+    first = None
+    for concepts in (doc.get('facts') or {}).values():
+        for node in concepts.values():
+            for rows in (node.get('units') or {}).values():
+                for r in rows:
+                    f = r.get('filed')
+                    if f and r.get('form') in ANNUAL_REPORT_FORMS and (first is None or f < first):
+                        first = f
+    return str(first)[:10] if first else None
+
+
 def merge_facts(docs: list) -> dict:
-    """One companyfacts document from a company's successive registrations.
+    """One companyfacts document from a company's successive registrations,
+    current first (`cik_family` order).
 
     Every fact from every registration, side by side: `fundamentals` already
     keeps the most recently filed value for each period, so where the new
     registration restates a year the old one filed, the restatement wins -
     exactly as it does for any restatement within one registration.
+
+    Each earlier registration counts only for what it filed before the one
+    that followed it filed its first annual report. After that it is a
+    subsidiary or a shell - Apache, Baker Hughes Holdings LLC and Apollo
+    Asset Management kept filing 10-Ks for years after their parents took
+    over - and its figures are not the company's. Merged whole, a subsidiary's
+    later report won latest-filed-wins over the parent's own, its cover-page
+    share count included. A successor with no annual report yet cuts nothing:
+    until it files one, the predecessor's are the company's latest.
     """
     out = {'cik': docs[0].get('cik'), 'entityName': docs[0].get('entityName'), 'facts': {}}
-    for doc in docs:
+    for i, doc in enumerate(docs):
+        cut = first_annual_report(docs[i - 1]) if i else None
         for taxonomy, concepts in (doc.get('facts') or {}).items():
             into = out['facts'].setdefault(taxonomy, {})
             for name, node in concepts.items():
-                units = into.setdefault(name, {'units': {}})['units']
                 for unit, rows in (node.get('units') or {}).items():
-                    units.setdefault(unit, []).extend(rows)
+                    if cut:
+                        # ISO dates compare as strings; a fact with no filing
+                        # date cannot be shown to precede the cut.
+                        rows = [r for r in rows if r.get('filed') and str(r['filed'])[:10] < cut]
+                    if rows:
+                        into.setdefault(name, {'units': {}})['units'].setdefault(unit, []).extend(rows)
     return out
 
 
@@ -523,7 +733,7 @@ def fetch_many(tickers, cfg: ValuationConfig, force: bool = False,
     companyfacts document expands to about 20 MB in memory, and holding all of
     them measured 1.1 GB at 49 companies - a MemoryError for the S&P 500.
     """
-    ciks, missing = resolve_ciks(tickers, verbose=verbose)
+    ciks, missing = resolve_ciks(tickers, verbose=verbose, cfg=cfg)
     if missing and verbose:
         print(f'  no CIK for {len(missing)} ticker(s): {", ".join(missing[:12])}'
               + (' ...' if len(missing) > 12 else ''))
@@ -1098,7 +1308,9 @@ def get_splits(tickers, max_age_days: int = 7, force: bool = False,
     comparative years that appear in a later annual report - so Apple's EPS
     history arrives on three different bases at once (pre-2014, post-7:1, and
     post-4:1 from 2020). The correction is applied per fact, using the splits
-    after the date that fact was *filed*.
+    after the date that fact was *filed*. Yahoo books spin-offs here too, as
+    "splits" of the price ratio across them; `fundamentals.classify_splits`
+    keeps those from being restated as share splits.
 
     Three cache rules, each the fix for a way an earlier version lied:
 
