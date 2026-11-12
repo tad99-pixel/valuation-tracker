@@ -429,6 +429,20 @@ join), *dear* 162, *value unclear* 73, *No* 235, *insufficient data* 10.
 Of the 166 margins withheld, 60 have one model and 106 have models more
 than 3x apart.
 
+Under config r9, on the closes of 10 November that r8 last ran on, the
+margin is measurable for **332** (from 313) and the median is 1.82x, with
+29 below their estimate and 6 below two-thirds of it. *Candidate* 6
+(Lennar, Synchrony, D.R. Horton, T. Rowe Price, Deckers, Cognizant),
+*cheap, quality passes* 3 (HP, CF Industries, PayPal), *fair price* 9,
+*statistically cheap only* 8, *dear* 177, *value unclear* 55, *No* 234,
+*insufficient data* 9. The corrections to the models moved few verdicts:
+seventeen companies went from *value unclear* to *dear* because their two
+models now agree, Adobe and Gartner from *value unclear* to *fair price*,
+Deckers and Cognizant from *fair price* to *Candidate*, and no watchlist
+verdict changed. A third of the index - 163 of 501 - earned less per share
+last year than four years before, 2021 having been a high mark, and carries
+the note that says so; Lennar, T. Rowe Price and HP are among them.
+
 ## How it was checked
 
 Besides the regression tests, the package went through a maximum-effort code
