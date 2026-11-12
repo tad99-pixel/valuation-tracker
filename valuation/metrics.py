@@ -216,6 +216,51 @@ def trailing_average(series, n: int, min_valid: int | None = None):
     return float(v.mean()), note
 
 
+def earning_power(series, revenue, n: int, min_valid: int = 3):
+    """What a business earns at its present size and its normal profitability:
+    the mean margin of `series` on revenue over `n` years, times the revenue
+    it holds now. Returns ``(dollars, note)``, or ``(None, why)``.
+
+    Averaging exists to take the cycle out of profitability, not to rewind
+    the size of the business. A mean of the *dollars* does both: for a
+    company growing 10% a year a five-year mean sits a sixth below what it
+    earns today and a seven-year mean a quarter below, and for one shrinking
+    8% a year they sit a fifth and a quarter above. The models built on those
+    means leaned by that much towards whatever was in decline - and the
+    backtest's buy list was Franklin Resources, Gilead, Biogen and IBM, each
+    valued on earnings it no longer had.
+
+    Revenue held now is the lower of the latest year's and the mean of the
+    last three - the three years the latest annual report itself presents,
+    restated onto one basis after a divestiture or a spin-off. A year above
+    the recent mean has not shown it will last; a year below it is the size
+    of the business until shown otherwise.
+
+    Every year's margin counts, special charges included, as Graham required
+    of average earnings. With no revenue filed the dollar mean stands.
+    """
+    s = _series(series)
+    rev = _series(revenue).reindex(s.index) if revenue is not None else pd.Series(np.nan, index=s.index)
+    if not len(s) or rev.notna().sum() == 0:
+        value, note = trailing_average(s, n, min_valid=min_valid)
+        return value, (f'{note}; no revenue filed to normalise on' if value is not None else note)
+    margin = (s / rev.where(rev > 0)).iloc[-n:]
+    v = margin.dropna()
+    if len(v) < min_valid:
+        return None, (f'needs {min_valid} of the last {n} fiscal years with revenue filed, '
+                      f'has {len(v)}')
+    last = rev.iloc[-1]
+    if pd.isna(last) or last <= 0:
+        return None, 'the latest fiscal year\'s revenue is not filed'
+    recent = rev.iloc[-3:].dropna()
+    held, which = float(last), 'the latest year\'s'
+    if len(recent) >= 2 and float(recent.mean()) < held:
+        held, which = float(recent.mean()), f'the {len(recent)}-year mean'
+    m = float(v.mean())
+    years = f'{n}y' if len(v) == n else f'{len(v)} of the last {n} years\''
+    return m * held, f'{years} mean margin {m:.1%} on {which} revenue ${held / 1e9:,.2f}bn'
+
+
 def positive_years(series, window: int):
     """Positive years among the last `window`, how many were filed, and the losses."""
     v = tail_years(series, window).dropna()
@@ -656,11 +701,29 @@ def summarise(panel: pd.DataFrame, cfg, group: str = 'operating',
             return ps, 'per share, net of dilution'
         return agg, ('total, buybacks not credited' if ps > agg + 1e-9 else 'total')
 
+    def recent_rate(total):
+        """``(rate, basis)``: growth across the three years the latest annual
+        report presents - the lower of total and per share, as above."""
+        agg = cagr(total, 2, min_span=1.5)[0] if total is not None else None
+        if agg is None:
+            return None, None
+        ps = (cagr(_series(total) / shares.replace(0, np.nan), 2, min_span=1.5)[0]
+              if len(shares) else None)
+        return (ps, 'per share') if ps is not None and ps < agg else (agg, 'total')
+
     oe, _ = owner_earnings(panel, b.maintenance_capex_method, group)
+    revenue = panel.get('revenue')
     out['owner_earnings_latest'] = latest(oe) if oe is not None else None
     out['owner_earnings_avg'] = trailing_average(oe, 5, min_valid=3)[0] if oe is not None else None
+    # The bases the value models capitalise: normal margin on present revenue.
+    scale = revenue if b.normalise_on_revenue else None       # None: the dollar means
+    out['owner_earnings_base'], out['owner_earnings_base_note'] = (
+        earning_power(oe, scale, 5) if oe is not None else (None, 'owner earnings not estimable'))
+    out['operating_income_base'], out['operating_income_base_note'] = earning_power(
+        panel.get('operating_income'), scale, b.epv_normalisation_years)
     out['owner_earnings_cagr'], out['owner_earnings_cagr_basis'] = credited_rate(oe)
-    out['revenue_cagr'], out['revenue_cagr_basis'] = credited_rate(panel.get('revenue'))
+    out['revenue_cagr'], out['revenue_cagr_basis'] = credited_rate(revenue)
+    out['revenue_recent_cagr'], out['revenue_recent_basis'] = recent_rate(revenue)
 
     # The alternative estimator, so the dashboard can show the spread rather
     # than presenting one guess as the answer.

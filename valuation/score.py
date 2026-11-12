@@ -366,9 +366,17 @@ def evaluate(ticker: str, panel: pd.DataFrame, info: dict,
     mos = B.margin_of_safety(price, consensus, cfg)
 
     t_def, t_ent, t_qual = _tally(defensive), _tally(enterprising), _tally(quality)
+    # Graham's ch. 15 test: shown with the quality tests, kept out of their
+    # tally, and - unless `require_earnings_growth` is set - deciding nothing
+    # (see `buffett.earnings_growth_test` and the flag for why).
+    shown = B.earnings_growth_test(panel, info, cfg)
+    earning_less = shown.verdict == FAIL
+    declining = cfg.score.require_earnings_growth and earning_less
 
     # --- data completeness, over tests that could apply at all ------------
+    # (the scored ones: the test shown for information is added afterwards)
     all_criteria = defensive + enterprising + quality
+    quality = quality + [shown]
     # An N/A for a structural reason (a bank has no current ratio) is not a
     # data gap - it is a test that does not exist for this company, and
     # counting it against completeness would mark every bank as unanalysable.
@@ -415,12 +423,21 @@ def evaluate(ticker: str, panel: pd.DataFrame, info: dict,
         verdict = 'NO PRICE'
     elif parts and completeness >= s.min_data_completeness:
         composite = float(np.average(parts, weights=weights))
-        verdict = _verdict_band(composite, mos, t_def, t_qual, s)
+        verdict = _verdict_band(composite, mos, t_def, t_qual, s, declining)
     else:
         composite = None
         verdict = 'INSUFFICIENT DATA'
 
     reasons = []
+    if declining:
+        reasons.append('earnings are below those of '
+                       f'{cfg.buffett.earnings_growth_years} years before, so it cannot be a '
+                       'Candidate or a fair-price verdict until they recover, whatever its '
+                       'ten-year tests say (Graham, ch. 15)')
+    elif earning_less:
+        reasons.append('last year\'s earnings are below those of '
+                       f'{cfg.buffett.earnings_growth_years} years before - the ten-year tests '
+                       'cannot see that (Graham\'s ch. 15 test; shown, not scored)')
     if price is None:
         reasons.append('no current price - delisted, acquired, or the ticker has changed')
     if completeness < s.min_data_completeness:
@@ -483,20 +500,27 @@ def evaluate(ticker: str, panel: pd.DataFrame, info: dict,
 
 
 def _verdict_band(composite: float, mos: dict, t_def: dict, t_qual: dict,
-                  s: ScoreConfig | None = None) -> str:
+                  s: ScoreConfig | None = None, declining: bool = False) -> str:
     """A label from `VERDICTS`, deliberately coarse.
 
     Finer gradations would imply a precision the inputs do not have. The
     valuation side and the quality side are kept distinct, because a cheap bad
     business and an expensive good one are different mistakes and a single
     number hides which one is on offer.
+
+    `declining` is set only under `ScoreConfig.require_earnings_growth`, which
+    is off: last year's earnings not above those of four years before. It
+    then withholds the three verdicts that say a good business can be had at
+    or below its value - cheap, the company is statistically cheap only; at
+    a fair price, one to watch - and leaves the rest to the ten-year record.
     """
     s = s or ScoreConfig()
     measured = mos['verdict'] == 'MEASURED'
     cheap = measured and mos.get('band') in ('STRONG', 'ADEQUATE')
     fair = measured and mos.get('band') == 'THIN'
     dear = measured and mos.get('band') == 'PREMIUM'
-    quality_ok = (t_qual['rate'] or 0) >= s.quality_pass_rate
+    record_ok = (t_qual['rate'] or 0) >= s.quality_pass_rate
+    quality_ok = record_ok and not declining
     graham_ok = (t_def['rate'] or 0) >= s.graham_pass_rate
 
     if quality_ok and cheap and graham_ok:
@@ -509,13 +533,15 @@ def _verdict_band(composite: float, mos: dict, t_def: dict, t_qual: dict,
         # for this, and Nike - eight of nine quality tests passed, priced at
         # 0.99x its estimate - fell through to NO.
         return 'GOOD BUSINESS, FAIR PRICE'
-    if quality_ok and dear:
+    if record_ok and dear:
         return 'GOOD BUSINESS, DEAR'
-    if quality_ok:
+    if record_ok and not measured:
         return 'GOOD BUSINESS, VALUE UNCLEAR'
     if cheap:
         return 'STATISTICALLY CHEAP ONLY'
-    if composite >= s.watch_composite:
+    if record_ok or composite >= s.watch_composite:
+        # A good record at a fair price with earnings lower, or a composite
+        # high enough to be worth a look.
         return 'WATCH'
     return 'NO'
 

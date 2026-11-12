@@ -1758,6 +1758,121 @@ def test_edgar_search_and_secs_maintained_file_are_read_exactly():
     print('  EDGAR search: an exact ticker only; a refusal is not "not found"')
 
 
+# ---------------------------------------------------------------------------
+# What the backtest's buy list had in common (2026-11-11, config r9)
+# ---------------------------------------------------------------------------
+
+def test_earning_power_is_normal_margin_on_present_revenue():
+    """A five-year mean of dollars values a growing company at the size it had
+    two years ago and a shrinking one at a size it has lost - a lean of some
+    40% between them, towards whatever is in decline. The margin is what gets
+    averaged; the revenue is what the business holds now."""
+    idx = years(8, 2018)
+    grow = pd.Series(1e9 * 1.10 ** np.arange(8), index=idx)
+    shrink = pd.Series(1e9 * 0.92 ** np.arange(8), index=idx)
+    for rev in (grow, shrink):
+        earned = rev * 0.20
+        base, note = M.earning_power(earned, rev, 5)
+        dollars = float(earned.iloc[-5:].mean())
+        held = min(float(rev.iloc[-1]), float(rev.iloc[-3:].mean()))
+        assert abs(base - 0.20 * held) < 1e-3, (base, note)
+        assert (base > dollars) == (rev is grow), (base, dollars)
+    # A year above the recent mean has not shown it will last ...
+    assert 'the 3-year mean' in M.earning_power(grow * 0.2, grow, 5)[1]
+    # ... and a year below it is the size of the business now.
+    assert "the latest year's" in M.earning_power(shrink * 0.2, shrink, 5)[1]
+    # Special charges stay in the average, as Graham required.
+    hit = grow * 0.20
+    hit.iloc[-2] = -float(grow.iloc[-2]) * 0.30
+    assert M.earning_power(hit, grow, 5)[0] < M.earning_power(grow * 0.2, grow, 5)[0] * 0.6
+    # No revenue filed: the dollar mean stands.
+    base, note = M.earning_power(grow * 0.2, None, 5)
+    assert abs(base - float((grow * 0.2).iloc[-5:].mean())) < 1e-3 and 'no revenue' in note
+    assert M.earning_power(grow * 0.2, grow.iloc[:0], 5)[0] is not None
+    print('  earning power: mean margin on the revenue held now, not a mean of dollars')
+
+
+def test_growth_is_credited_only_as_far_as_it_still_shows():
+    """At the end of 2018 Gilead's revenue was a fifth below its peak and its
+    ten-year rate, across the hepatitis C boom, still earned the 15% cap. The latest
+    report's three years can take the premium over the terminal rate away -
+    and no more: two years of a farm cycle do not prove Deere will shrink for
+    ten."""
+    p, info, prices = synthetic_company(growth=0.12)
+    r = S.evaluate('X', p, info, prices, MACRO, CFG)
+    steady = r['models']['dcf']['detail']['growth_stage1']
+    assert steady > 0.10, steady
+    slowed = p.copy()
+    slowed.loc[slowed.index[-2:], 'revenue'] = slowed['revenue'].iloc[-3] * np.array([1.04, 1.0816])
+    d = S.evaluate('X', slowed, info, prices, MACRO, CFG)['models']['dcf']['detail']
+    assert abs(d['growth_stage1'] - 0.04) < 1e-3 and 'still showing' in d['growth_source'], d
+    peaked = p.copy()
+    peaked.loc[peaked.index[-2:], 'revenue'] = peaked['revenue'].iloc[-3] * np.array([0.9, 0.8])
+    r2 = S.evaluate('X', peaked, info, prices, MACRO, CFG)
+    d = r2['models']['dcf']['detail']
+    assert d['growth_stage1'] == CFG.buffett.terminal_growth, d
+    assert r2['models']['dcf']['value'] < 0.75 * r['models']['dcf']['value']
+    # A decline is credited where the ten-year record shows one.
+    shrinking, sinfo, sprices = synthetic_company(growth=-0.03)
+    d = S.evaluate('X', shrinking, sinfo, sprices, MACRO, CFG)['models']['dcf']['detail']
+    assert d['growth_stage1'] < 0, d
+    print(f'  growth: {steady:.1%} while it lasts, {CFG.buffett.terminal_growth:.1%} once it has stopped')
+
+
+def test_graham_earnings_growth_test_is_shown_and_decides_nothing():
+    """Graham, ch. 15: "last year's earnings more than those of 1966". The
+    ten-year medians pass a business in decline for years, and the backtest's
+    buy list - Franklin Resources, Gilead, Biogen, IBM - was made of them. As
+    a requirement it was tried and not adopted: the picks it removed lagged
+    over one year and did better than the rest over three and five."""
+    from dataclasses import replace
+    p, info, prices = synthetic_company(final_pe=6.0)
+    r = S.evaluate('X', p, info, prices, MACRO, CFG)
+    c = crit(r, 'earnings_growth')
+    assert c.verdict == 'PASS' and c.source_tier == 'graham', c
+    assert r['verdict'] in ('CANDIDATE', 'CHEAP, QUALITY PASSES'), r['verdict']
+    # Shown with the quality tests, out of their tally and of completeness -
+    # as a tenth test it was extra credit for whoever passed it.
+    counted = r['quality_tally']['applicable'] + r['quality_tally']['na']
+    assert c in r['quality'] and counted == len(r['quality']) - 1, r['quality_tally']
+
+    fading = p.copy()
+    fading.loc[fading.index[-1], 'eps'] = float(p['eps'].iloc[-5]) * 0.9
+    r2 = S.evaluate('X', fading, info, prices, MACRO, CFG)
+    assert crit(r2, 'earnings_growth').verdict == 'FAIL'
+    assert r2['verdict'] == r['verdict'] and r2['completeness'] == r['completeness'], r2['verdict']
+    assert any('shown, not scored' in x for x in r2['caveats']), r2['caveats']
+
+    # The variant that was tested: required of the buy-side verdicts only.
+    strict = replace(CFG, score=replace(CFG.score, require_earnings_growth=True))
+    r3 = S.evaluate('X', fading, info, prices, MACRO, strict)
+    assert r3['quality_tally']['rate'] >= CFG.score.quality_pass_rate, 'the medians still pass it'
+    assert r3['verdict'] == 'STATISTICALLY CHEAP ONLY', r3['verdict']
+    dp, dinfo, dprices = synthetic_company(final_pe=60.0)
+    dp.loc[dp.index[-1], 'eps'] = float(dp['eps'].iloc[-5]) * 0.9
+    assert S.evaluate('X', dp, dinfo, dprices, MACRO, strict)['verdict'] == 'GOOD BUSINESS, DEAR'
+    thin = {'verdict': 'MEASURED', 'band': 'THIN'}
+    ok, poor = {'rate': 0.9}, {'rate': 0.2}
+    assert S._verdict_band(0.5, thin, ok, ok, declining=False) == 'GOOD BUSINESS, FAIR PRICE'
+    assert S._verdict_band(0.5, thin, ok, ok, declining=True) == 'WATCH'
+    assert S._verdict_band(0.5, thin, ok, poor, declining=True) == 'NO'
+
+    # A spin-off in between comes out of the earlier figure: the parent kept
+    # 1/1.25 of the company, and is earning more than that part did.
+    mid = (p.index[-3] + pd.Timedelta(days=30)).strftime('%Y-%m-%d')
+    spun = B.earnings_growth_test(fading, dict(info, spinoffs=[{'date': mid, 'ratio': 1.25}]), CFG)
+    assert spun.verdict == 'PASS' and 'spun off' in spun.detail, spun
+    # A loss fails; a profit after a loss passes; too short a record is unknown.
+    loss = p.copy()
+    loss.loc[loss.index[-1], 'eps'] = -0.10
+    assert B.earnings_growth_test(loss, info, CFG).verdict == 'FAIL'
+    was = p.copy()
+    was.loc[was.index[-5], 'eps'] = -0.10
+    assert B.earnings_growth_test(was, info, CFG).verdict == 'PASS'
+    assert B.earnings_growth_test(p.iloc[-4:], info, CFG).verdict == 'N/A'
+    print('  quality: Graham\'s earnings-growth test is shown, out of the tally, and decides nothing')
+
+
 if __name__ == '__main__':
     tests = [v for k, v in list(globals().items()) if k.startswith('test_') and callable(v)]
     for fn in tests:

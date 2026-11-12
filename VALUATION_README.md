@@ -44,7 +44,8 @@ arithmetic attached; nothing here is a recommendation to buy or sell anything.
 | **Graham's seven defensive tests** | *The Intelligent Investor*, ch. 14 | size, financial condition (current ratio and debt vs working capital; for utilities, debt vs equity), 10 years of earnings, 20 years of dividends, 10-year EPS growth, P/E <= 15, P/B <= 1.5 (or P/E x P/B <= 22.5) - seven tests, each counted once |
 | **Graham's 1976 ten-point screen** | his last published screen | five reward tests (earnings yield vs AAA, P/E vs its 5-year high, dividend yield, price vs tangible book, price vs NCAV) and five risk tests |
 | **Buffett quality proxies** | the Berkshire letters, plus labelled third-party proxies | ROE across the cycle, ROIC, debt repayable from earnings, margin level and stability, cash conversion, dilution, the 1984 one-dollar premise |
-| **Intrinsic value** | earnings-based models | two-stage DCF on owner earnings and earnings power value; for banks, insurers and utilities, justified P/B and earnings capitalised at the required return; for REITs, the DCF on funds from operations and the same FFO capitalised without growth |
+| **Graham's earnings-growth test** | *The Intelligent Investor*, ch. 15 | last year's earnings above those of four years before - shown beside the quality tests, not scored |
+| **Intrinsic value** | earnings-based models | two-stage DCF on owner earnings and earnings power value, both on the company's average margin and present revenue; for banks, insurers and utilities, justified P/B and earnings capitalised at the required return; for REITs, the DCF on funds from operations and the same FFO capitalised without growth |
 | **Graham's price limits** | his rules, restated as prices | 15 x 3-year average EPS (criterion 6), the Graham Number, net current assets and two-thirds of them - the most he would pay, shown beside the estimate |
 | **What the price assumes** | reverse DCF | the growth today's price needs, beside the growth the record supports |
 
@@ -67,12 +68,12 @@ the dividend record in the price history.
 into a valuation; the reverse DCF converts today's price into the assumption it
 embeds, which can be checked against what the business has actually done. It
 needs no growth forecast - but it is not free of inputs. Coca-Cola's price
-implies 25% growth a year for ten years at its 9.3% discount rate, 21% at
-8.3% and 30% at 10.3%, so the rate one point either side is reported with
+implies 24% growth a year for ten years at its 9.2% discount rate, 20% at
+8.2% and 28% at 10.2%, so the rate one point either side is reported with
 it. Coca-Cola's conclusion holds across that range - its revenue has grown
 1.5% a year and its owner earnings 7% - so it is a finding. Exxon's does not:
-its price implies 2.3% growth at 9.1%, below the 4.8% its record supports,
-but 5.7% at 10.1%.
+its price implies 3.2% growth at 9.1%, a little more than the 2.5% it is
+credited with, but shrinkage at 8.1% and 6.6% at 10.1%.
 
 **The discount rate follows the debt.** Everything starts from one required
 return on the business, 9% before debt. Owner earnings are struck after
@@ -80,11 +81,41 @@ interest, so the DCF discounts them at the return the equity needs, which
 rises with leverage; operating income is struck before interest, so the
 earnings power value capitalises it at the return the whole company needs,
 which tax-deductible debt lowers (Modigliani-Miller, at market values).
-Verizon, with debt at 0.84x its market value, is discounted at 10.9% and
+Verizon, with debt at 0.82x its market value, is discounted at 10.9% and
 capitalised at 8.1%; Apple, with almost none, at 9.0% for both. A flat 9%
 treated a heavily indebted company's shares as no riskier than its business.
 Banks and insurers borrow as their business, and a utility's regulator sets
 its return on its book equity, debt and all, so their rate is not adjusted.
+
+**The earnings valued are today's business at its normal margin.** Both
+models start from the same kind of figure: the company's average margin -
+owner earnings over five years, operating income over seven - on the
+revenue it holds now, which is the lower of last year's and the three-year
+mean. Averaging is there to take the cycle out of profitability, not to
+rewind the size of the business. Until config r9 the models averaged the
+dollars, which values a company growing 10% a year at the size it had two or
+three years ago and one shrinking 8% a year at a size it has lost: a lean of
+40% or more towards whatever was in decline.
+
+**Growth is credited only while it shows.** The DCF's growth rate is the
+lowest of three: owner earnings over ten years, revenue over the same ten,
+and - for anything above the 2.5% terminal rate - revenue across the three
+years the latest annual report presents. A ten-year rate cannot see a
+business that has peaked: at the end of 2018 Gilead's still earned the 15%
+cap, with revenue a fifth below its peak and falling. The recent years can
+take the premium away and no more: two years show that growth has stopped,
+not that the business will shrink for ten.
+
+**The ten-year tests cannot see a turn.** The quality tests read ten-year
+medians, and a business in decline goes on passing those until its good
+years leave the window. So one more test is shown beside them - Graham's,
+for the enterprising investor: last year's earnings per share above those of
+four years before - and a company that fails it carries a note saying so.
+It is shown and not scored. Made a requirement of the buy-side verdicts, it
+was tried against the backtest and did not earn the place: the picks it
+removed lagged over the next year, but did better than the ones it kept over
+three years and five. Depressed earnings recover more often than not, which
+is the premise of judging a business on ten years.
 
 **N/A is not Fail.** A test is N/A when its data does not exist, or when it does
 not apply - a current ratio for a bank is a category error. Collapsing the two
@@ -109,6 +140,8 @@ companies. They are shown, never averaged in.
 **The composite only sorts the list.** Neither author weighted tests into one
 number. The verdict is deliberately coarse:
 
+"Quality passes" means at least 60% of the applicable quality tests pass.
+
 | Verdict | Means |
 |---|---|
 | Candidate | quality passes, Graham's defensive tests mostly pass, measured margin >= 15% |
@@ -126,11 +159,12 @@ number. The verdict is deliberately coarse:
 
 `.github/workflows/valuation.yml` runs the tracker at 22:30 UTC on weekdays
 (after the US close), on any push that changes the code or the watchlist, and
-on demand from the Actions tab ("Run workflow"). GitHub drops and delays
-scheduled runs when it is busy - the first evening's never started, and the
-first catch-up began 44 minutes late - so a second schedule at 03:30 UTC
-catches up. A scheduled run does nothing when the history already holds the
-latest close; pushes and manual runs always run in full. Each run:
+on demand from the Actions tab ("Run workflow"). GitHub starts scheduled
+runs late, and may drop them when it is busy: this repository's first three
+began 5 hours 44 minutes, 8 hours and 3 hours 35 minutes after their slots.
+So a second schedule at 03:30 UTC catches up, and a scheduled run does
+nothing when the history already holds the latest close; pushes and manual
+runs always run in full. Each run:
 
 1. runs the regression tests, and stops if any fail;
 2. restores the previous run's downloads (filings, prices, splits and
@@ -554,8 +588,9 @@ short. Each change was checked on all ~500 companies before it shipped:
   when a verdict enters or leaves the four priced at or below value; and a
   crossing or band move must clear 2% from the state last reported.
 
-Config r9 (2026-11-10) fixed two data errors that the point-in-time backtest
-found in the live tracker:
+Config r9 (2026-11-11) came out of the point-in-time backtest
+([BACKTEST.md](BACKTEST.md)): two data errors it found in the live tracker,
+and two corrections to the value models that its results pointed to.
 
 - **Spin-offs were restated as splits.** Yahoo books a spin-off as a
   "split" of the price ratio across it - ninety-odd in the S&P 500's
@@ -600,6 +635,35 @@ are *good business, dear*, one *fair price* (Everest), three *value
 unclear*, three *insufficient data* and eleven *No*; HONA (no annual report)
 and VYLR (declined) remain.
 
+The backtest's own finding was that the tracker's buy list had trailed the
+market by 7.6% a year, and that it was made of businesses in decline:
+Franklin Resources in seven years of ten, Gilead, Biogen, IBM. That pointed
+at the models, and two things in them were wrong on paper:
+
+- **The models valued a mean of past dollars** - five years of owner
+  earnings, seven of operating income - which is the business at the size it
+  had two or three years ago. A grower was valued a sixth to a quarter low
+  and a shrinker a fifth to a quarter high: a lean of 40% or more towards
+  whatever was in decline. They now take the average *margin* on the revenue
+  held now (see *Reading the output honestly*). Earnings power values rose
+  by 13% at the median and the DCF's did not move; nineteen more companies'
+  models agree within 3x.
+- **Growth was credited after it had stopped.** A ten-year rate still gave
+  Gilead the 15% cap at the end of 2018. Above the terminal rate, growth is
+  now credited only as far as the latest annual report's own three years
+  show it.
+
+And one thing was tried and left out: **Graham's earnings-growth test as a
+requirement** for the buy-side verdicts. It is shown beside the quality
+tests and scored nowhere; BACKTEST.md has the numbers that decided it.
+
+Re-run under r9, the buy list trailed by 6.3% a year over one year, 6.6%
+over three and 3.7% over five, against 7.6%, 9.1% and 7.6%; the earnings
+base did most of that. It still lagged, and price-to-value still ranked
+nothing. Those ten years were also the years the rules were corrected on, so
+the improvement proves less than it seems to: the changes are in because the
+old models were wrong in a way that can be shown on paper.
+
 ## Known limits
 
 - **Two value models, not three.** With 15 x earnings moved to the price
@@ -636,8 +700,21 @@ and VYLR (declined) remain.
   and today's market values. The reverse DCF exists so that no conclusion
   depends on it alone.
 - **Cyclicals** defeat any ten-year growth rate. Growth is smoothed with
-  three-year medians and capped at revenue growth and 15%, but a business at a
-  cyclical peak will still look better than it is.
+  three-year medians and capped at revenue growth and 15%, and the earnings
+  base takes the lower of last year's revenue and the three-year mean, but a
+  business at a cyclical peak will still look better than it is.
+- **The verdicts have not predicted returns.** Over 2014-2023 the buy list
+  trailed the market and price-to-value ranked nothing
+  ([BACKTEST.md](BACKTEST.md)). It was a decade in which growth beat value
+  and the test is on today's survivors, but there is no evidence here that a
+  *Candidate* does better than the index.
+- **Annual reports only.** The latest fiscal year can be fourteen months
+  old; the quarterly filings in between are not read. At the end of 2020 the
+  airlines were valued on 2019.
+- **A spin-off parent's ten-year growth is understated.** Revenue and
+  earnings before a spin-off include the business that left: General
+  Electric's revenue reads as shrinking 12% a year, and its DCF takes the
+  -5% floor.
 - **Tickers outside the two indexes** rest on EDGAR's company search
   whenever SEC's frozen ticker.txt is wrong about them or lacks them, since
   SEC's maintained file needs a contact. If the search is unreachable too, a

@@ -34,7 +34,7 @@ LOG_PATH = ROOT / 'valuation_daily.log'
 # Stamped on every stored valuation. Bump whenever a threshold or a model
 # changes, so a tracker history is never silently pooled across two different
 # definitions of "margin of safety".
-CONFIG_VERSION = '2026-11-10-r9'
+CONFIG_VERSION = '2026-11-11-r9'
 
 for _d in (CACHE_DIR, FUND_DIR, FACTS_DIR, MACRO_DIR, STATE_DIR, REPORT_DIR):
     _d.mkdir(parents=True, exist_ok=True)
@@ -238,11 +238,23 @@ class BuffettConfig:
     # less prone to either. Taking the lower of the two is conservative by
     # construction, and both rates are reported so the choice is visible.
     cap_growth_at_revenue: bool = True
+    # ... and, above the terminal rate, only as far as the latest annual
+    # report's own three years still show it: a ten-year rate cannot see a
+    # business that has peaked.
+    cap_growth_at_recent: bool = True
+    # The earnings the models capitalise: the mean margin on the revenue held
+    # now (`metrics.earning_power`), not a mean of past dollars.
+    normalise_on_revenue: bool = True
 
     # Earnings Power Value (Greenwald): normalised operating earnings
     # capitalised at the whole-company rate, with no growth credited at all.
+    # The years are those the operating margin is averaged over.
     epv_normalisation_years: int = 7
     effective_tax_rate: float = 0.21
+
+    # Graham's earnings-growth test (ch. 15): last year's earnings above those
+    # of this many years before. He read 1970 against 1966.
+    earnings_growth_years: int = 4
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +300,17 @@ class ScoreConfig:
     quality_pass_rate: float = 0.60
     graham_pass_rate: float = 0.60
     watch_composite: float = 0.60
+    # Graham's ch. 15 test - last year's earnings above those of four years
+    # before (`buffett.earnings_growth_test`) - is shown with the quality
+    # tests and decides nothing. Required of the buy-side verdicts, it was
+    # tried against the backtest and not adopted. The 20 picks it would remove
+    # lagged the market by 8.9% over the next year, against 2.1% for the 72 it
+    # would keep - but by less over three years and five (1.8% a year against
+    # 4.4%, 2.3% against 3.3%), and across all companies those that failed it
+    # went on to beat the rest at every horizon. None of that is beyond noise
+    # on twenty picks, and depressed earnings recovering is the premise of
+    # judging a business on ten years. True restores the requirement.
+    require_earnings_growth: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +443,8 @@ PROVENANCE = {
     'min_net_margin': ('third-party', 'Mary Buffett, "Buffettology" - not Buffett\'s own text'),
     'max_gross_margin_cv': ('derived', 'margin stability as a moat proxy'),
     'share_count': ('buffett', 'repeated criticism of dilution; threshold is ours'),
+    'earnings_growth': ('graham', 'Intelligent Investor ch.15, enterprising-investor test 4: '
+                                  '"last year\'s earnings more than those of 1966" - four years before'),
     'dcf': ('derived', 'standard two-stage DCF; Buffett describes the concept, not these inputs'),
     'reverse_dcf': ('derived', 'growth implied by the current price - the DCF read backwards'),
     'epv': ('third-party', 'Greenwald, "Value Investing" - earnings power value'),

@@ -210,6 +210,70 @@ def quality_criteria(panel: pd.DataFrame, info: dict, summary: dict,
     return out
 
 
+def earnings_growth_test(panel: pd.DataFrame, info: dict, cfg: ValuationConfig):
+    """Graham's earnings-growth test for the enterprising investor (ch. 15):
+    "last year's earnings more than those of 1966" - four years before the
+    1970 figures he was reading.
+
+    Every other quality test here reads a ten-year median, and a business in
+    decline goes on passing those for years: its good years are still in the
+    window. The backtest's buy list was made of them - Franklin Resources in
+    seven years of ten, Gilead and Biogen after their peaks, IBM - and it
+    trailed the market by 7.6% a year. This test asks the one question the
+    medians cannot: is it earning more than it was?
+
+    It is shown, and decides nothing (`ScoreConfig.require_earnings_growth`
+    says why): made a requirement of the buy-side verdicts, it would remove
+    picks that lagged more over one year and less over three and five. It
+    stays out of the quality tally either way - counted as a tenth
+    test it was extra credit for whoever passed, and lifted Comcast from five
+    of nine to six of ten.
+
+    Per share, as Graham had it; a REIT's on funds from operations, its GAAP
+    EPS being carved out everywhere else. A spin-off in between is taken out
+    of the earlier figure by its price ratio - the market's own measure of how
+    much of the company left - so a parent is not failed for having handed a
+    business to its shareholders. Returns one `Criterion`.
+    """
+    years = cfg.buffett.earnings_growth_years
+    group = info.get('group', 'operating')
+    t = Test('earnings_growth', f'Earnings above those of {years} years before (shown, not scored)',
+             '', '> 0%', '{:+,.1%}')
+    if group == 'reit':
+        oe, _ = M.owner_earnings(panel, cfg.buffett.maintenance_capex_method, group)
+        shares = panel.get('shares_used')
+        s = (M._series(oe) / M._series(shares).replace(0, np.nan)
+             if oe is not None and shares is not None else pd.Series(dtype=float))
+        what = 'FFO per share'
+    else:
+        s, what = M._series(panel.get('eps')), 'EPS'
+    # The year `years` before by its date, not its row: a fiscal year missing
+    # from the record must not turn four years into five.
+    back = -1
+    if len(s) and isinstance(s.index, pd.DatetimeIndex):
+        back = int(s.index.get_indexer([s.index[-1] - pd.DateOffset(years=years)],
+                                       method='nearest', tolerance=pd.Timedelta(days=45))[0])
+    if back < 0 or pd.isna(s.iloc[-1]) or pd.isna(s.iloc[back]):
+        return t.na(f'needs {what} for the latest fiscal year and the one {years} years before')
+    now, then = float(s.iloc[-1]), float(s.iloc[back])
+    first, last = s.index[back], s.index[-1]
+    spun = 1.0
+    for sp in info.get('spinoffs') or []:
+        if first < pd.Timestamp(sp['date']) <= last:
+            spun *= float(sp['ratio'])
+    basis = then / spun
+    span = f'{M._year_label(last)} against {M._year_label(first)}'
+    note = (f' ({then:,.2f} as filed, less the {1 - 1 / spun:.0%} of the company spun off since)'
+            if spun != 1.0 else '')
+    if now <= 0:
+        return t.fail(f'{what} {now:,.2f} in {M._year_label(last)} - a loss, against '
+                      f'{basis:,.2f} in {M._year_label(first)}{note}')
+    if basis <= 0:
+        return t.judge(True, None, f'{what} {now:,.2f}, {span}\'s loss of {basis:,.2f}{note}')
+    return t.judge(now > basis, now / basis - 1.0,
+                   f'{what} {now:,.2f}, {span}\'s {basis:,.2f}{note}')
+
+
 # ---------------------------------------------------------------------------
 # Intrinsic value
 # ---------------------------------------------------------------------------
@@ -244,7 +308,12 @@ def _cash_flow_base(summary: dict, info: dict) -> tuple:
         return None, None, (f'owner earnings are not separable from the balance sheet '
                             f'of a {info.get("group")} - valued on justified P/B instead')
     # Explicit None checks: `or` would read a legitimate 0.0 as missing.
-    if summary.get('owner_earnings_avg') is not None:
+    # Normal margin on present revenue first (`metrics.earning_power`); the
+    # dollar means stand in only where there is no revenue to normalise on.
+    if summary.get('owner_earnings_base') is not None:
+        base = summary['owner_earnings_base']
+        basis = f'owner earnings ({summary.get("owner_earnings_base_note")})'
+    elif summary.get('owner_earnings_avg') is not None:
         base, basis = summary['owner_earnings_avg'], 'owner earnings (5y mean)'
     elif summary.get('owner_earnings_latest') is not None:
         base, basis = summary['owner_earnings_latest'], 'owner earnings (latest)'
@@ -368,6 +437,25 @@ def dcf_value(panel: pd.DataFrame, summary: dict, info: dict,
         g_hist = b.terminal_growth
         g_src = 'terminal rate (no defined historical growth)'
 
+    # Growth above the terminal rate is credited only as far as it is still
+    # showing. A ten-year rate cannot see a business that peaked: at the end
+    # of 2018 Gilead's revenue was a fifth below its peak and falling, and its
+    # ten-year rate - across the hepatitis C boom - still earned the 15% cap
+    # (the backtest's rows for 2017 and 2018). The latest
+    # annual report's own three years are the test, and they are on one basis
+    # after a divestiture. They can take the premium away; they cannot impose
+    # a decline. Two years show that growth has stopped, not that the business
+    # will shrink for ten: read that way, Deere's farm-cycle dip halved its
+    # value. A decline is credited only where the ten-year record shows one.
+    g_now = summary.get('revenue_recent_cagr')
+    if g_now is not None and b.cap_growth_at_recent:
+        still = max(g_now, b.terminal_growth)
+        if still < g_hist:
+            g_src += (f'; the latest three reported years show revenue growing {g_now:.1%} a '
+                      f'year ({summary.get("revenue_recent_basis")}), so no more than '
+                      f'{still:.1%} is credited - growth only as far as it is still showing')
+            g_hist = still
+
     g1 = float(np.clip(g_hist, b.min_stage1_growth, b.max_stage1_growth))
     r = rates['equity']
     pv = _two_stage_pv(base, g1, r, b.terminal_growth, b.stage1_years, b.fade_growth)
@@ -382,7 +470,9 @@ def dcf_value(panel: pd.DataFrame, summary: dict, info: dict,
                  f'{b.terminal_growth:.1%}, discounted at {r:.1%} ({rates["note"]})'),
     }
     if abs(g1 - g_hist) > 1e-9:
-        detail['note'] += f' (historical {g_hist:.1%} clipped to the {b.max_stage1_growth:.0%} cap)'
+        bound = (f'{b.max_stage1_growth:.0%} cap' if g_hist > g1
+                 else f'{b.min_stage1_growth:.0%} floor')
+        detail['note'] += f' (the record\'s {g_hist:.1%} held to the {bound})'
     return pv / shares, detail
 
 
@@ -517,11 +607,15 @@ def epv_value(panel: pd.DataFrame, summary: dict, info: dict,
     """Earnings power value: normalised operating earnings, no growth credited.
 
     Greenwald's construction, not Buffett's or Graham's. It capitalises
-    average operating earnings after tax at the cost of capital and credits
-    growth with nothing at all, which makes it a deliberately conservative
-    cross-check on a DCF whose answer depends on a growth forecast. Net debt
-    is subtracted here, because operating earnings are struck before interest
-    and so belong to debt and equity together.
+    normalised operating earnings after tax at the cost of capital and
+    credits growth with nothing at all, which makes it a deliberately
+    conservative cross-check on a DCF whose answer depends on a growth
+    forecast. Normalised as Greenwald does it - the average operating margin
+    of the cycle on the sales the business has now (`metrics.earning_power`) -
+    and not as a mean of seven years' dollars, which valued a growing company
+    at the size it had three years ago and a shrinking one at a size it had
+    lost. Net debt is subtracted here, because operating earnings are struck
+    before interest and so belong to debt and equity together.
     """
     b = cfg.buffett
     group = info.get('group', 'operating')
@@ -533,8 +627,10 @@ def epv_value(panel: pd.DataFrame, summary: dict, info: dict,
         return None, {'note': (G.reit_eps_reason(group) if group == 'reit' else
                                f'operating earnings and invested capital are not '
                                f'separable for a {group}')}
-    norm, note = M.trailing_average(panel.get('operating_income'),
-                                    b.epv_normalisation_years, min_valid=3)
+    norm, note = summary.get('operating_income_base'), summary.get('operating_income_base_note')
+    if 'operating_income_base' not in summary:        # a summary built by hand
+        norm, note = M.earning_power(panel.get('operating_income'), panel.get('revenue'),
+                                     b.epv_normalisation_years)
     if norm is None:
         return None, {'note': f'operating income: {note}'}
     if norm <= 0:
